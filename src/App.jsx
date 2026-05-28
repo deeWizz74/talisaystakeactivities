@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from './supabaseClient';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 
 // ─── Google Fonts ─────────────────────────────────────────────────────────────
 const fontLink = document.createElement('link');
@@ -658,7 +659,7 @@ export default function App() {
     } catch(err) { showToast(`Approval failed: ${err.message}`, 'error'); }
   };
 
-  // ── User CRUD ─────────────────────────────────────────────────────────────────
+  // ── User CRUD ────�����────────────────────���───────────────────────────────────────
   const openUserModal = (user = null) => {
     if (user) {
       setEditingUser(user);
@@ -738,6 +739,7 @@ export default function App() {
   if (!currentUser) {
     return (
       <>
+        <SpeedInsights />
         <GlobalStyles t={t} dark={dark} />
         <div className="network-bg" />
         <div style={{ minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', padding:20, position:'relative', zIndex:1 }}>
@@ -801,6 +803,7 @@ export default function App() {
   // ══════════════════════════════════════════════════════════════════════════════
   return (
     <>
+      <SpeedInsights />
       <GlobalStyles t={t} dark={dark} />
       <div className="network-bg" />
       <Toast message={feedbackMessage} />
