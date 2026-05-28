@@ -869,39 +869,60 @@ export default function App() {
                   <h2 style={{ fontSize:22, fontWeight:700, color:t.text1, marginBottom:4 }}>Upcoming Activities</h2>
                   <p style={{ fontSize:13, color:t.text3 }}>{currentUser.is_admin ? 'All upcoming activities.' : 'Approved activities visible to members.'}</p>
                 </div>
-                {filtered.length === 0 ? (
-                  <div style={{ padding:'60px 40px', textAlign:'center', background:t.surfaceCard, borderRadius:14, border:`1px dashed ${t.emptyBorder}`, color:t.emptyColor, fontSize:14 }}>📭 No upcoming activities scheduled.</div>
-                ) : (
-                  <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-                    {filtered.map(act => {
-                      const p = getOrgColors(act.organization, dark);
-                      const d = new Date(act.date+'T00:00:00');
-                      return (
-                        <div key={act.id} onClick={() => openActivityModal(act.date, act)} style={{ display:'flex', borderRadius:12, background:t.surfaceCard, border:`1px solid ${t.border}`, borderLeft:`4px solid ${p.border}`, overflow:'hidden', cursor:'pointer', transition:'all 0.18s', boxShadow:dark?'none':'0 1px 4px rgba(15,23,42,0.06)' }}
-                          onMouseEnter={e => e.currentTarget.style.boxShadow='0 4px 16px rgba(99,102,241,0.12)'}
-                          onMouseLeave={e => e.currentTarget.style.boxShadow=dark?'none':'0 1px 4px rgba(15,23,42,0.06)'}
-                        >
-                          <div style={{ minWidth:80, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'16px 20px', background:t.approvalDateBg, borderRight:`1px solid ${t.border}` }}>
-                            <span style={{ fontSize:10, fontWeight:700, color:t.text3, textTransform:'uppercase', letterSpacing:'0.08em' }}>{d.toLocaleDateString('en-US',{weekday:'short'})}</span>
-                            <span style={{ fontSize:28, fontWeight:800, color:t.text1, lineHeight:1 }}>{d.getDate()}</span>
-                            <span style={{ fontSize:10, color:t.text3 }}>{d.toLocaleDateString('en-US',{month:'short'})}</span>
-                          </div>
-                          <div style={{ padding:'16px 20px', flexGrow:1, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                            <div>
-                              <h4 style={{ fontSize:15, fontWeight:700, color:t.text1, marginBottom:5 }}>{act.title}</h4>
-                              <div style={{ display:'flex', gap:14, fontSize:12, color:t.text2, flexWrap:'wrap' }}>
-                                <span>⏰ {fmt12(act.start_time)} – {fmt12(act.end_time)}</span>
-                                {act.location && <span style={{ color:'#6366f1' }}>📍 {act.location}</span>}
-                                <span style={{ color:t.text3 }}>⧗ {calcDuration(act.start_time, act.end_time)}</span>
-                              </div>
+                {(() => {
+                  // Get the year and month currently selected on your dashboard calendar view
+                  const currentYear = currentDate.getFullYear();
+                  const currentMonth = currentDate.getMonth();
+
+                  // Filter your existing "filtered" activities array to match the selected calendar month view
+                  const activeMonthFiltered = filtered.filter(act => {
+                    const eventDate = new Date(act.date + 'T00:00:00');
+                    return eventDate.getFullYear() === currentYear && eventDate.getMonth() === currentMonth;
+                  });
+
+                  if (activeMonthFiltered.length === 0) {
+                    return (
+                      <div style={{ padding: '60px 40px', textAlign: 'center', background: t.surfaceCard, borderRadius: 14, border: `1px dashed ${t.emptyBorder}`, color: t.emptyColor, fontSize: 14 }}>
+                        📭 No upcoming activities scheduled for this month view.
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {activeMonthFiltered.map(act => {
+                        const p = getOrgColors(act.organization, dark);
+                        const d = new Date(act.date + 'T00:00:00');
+                        return (
+                          <div 
+                            key={act.id} 
+                            onClick={() => openActivityModal(act.date, act)} 
+                            style={{ display: 'flex', borderRadius: 12, background: t.surfaceCard, border: `1px solid ${t.border}`, borderLeft: `4px solid ${p.border}`, overflow: 'hidden', cursor: 'pointer', transition: 'all 0.18s', boxShadow: dark ? 'none' : '0 1px 4px rgba(15,23,42,0.06)' }}
+                            onMouseEnter={e => e.currentTarget.style.boxShadow = '0 4px 16px rgba(99,102,241,0.12)'}
+                            onMouseLeave={e => e.currentTarget.style.boxShadow = dark ? 'none' : '0 1px 4px rgba(15,23,42,0.06)'}
+                          >
+                            <div style={{ minWidth: 80, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '16px 20px', background: t.approvalDateBg, borderRight: `1px solid ${t.border}` }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, color: t.text3, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{d.toLocaleDateString('en-US', { weekday: 'short' })}</span>
+                              <span style={{ fontSize: 28, fontWeight: 800, color: t.text1, lineHeight: 1 }}>{d.getDate()}</span>
+                              <span style={{ fontSize: 10, color: t.text3 }}>{d.toLocaleDateString('en-US', { month: 'short' })}</span>
                             </div>
-                            <span style={{ background:p.bg, color:p.text, border:`1px solid ${p.border}`, padding:'4px 12px', borderRadius:20, fontSize:11, fontWeight:700, whiteSpace:'nowrap', marginLeft:16 }}>{act.organization||'General'}</span>
+                            <div style={{ padding: '16px 20px', flexGrow: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                                <span className="badge" style={{ background: p.bg, color: p.text, border: `1px solid ${p.border}` }}>{act.organization || 'General'}</span>
+                                {act.location && <span style={{ fontSize: 12, color: '#6366f1', fontWeight: 500 }}>📍 {act.location}</span>}
+                              </div>
+                              <h4 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: t.text1 }}>{act.title}</h4>
+                              <div style={{ fontSize: 12, color: t.text2, marginTop: 4, display: 'flex', gap: 12 }}>
+                                <span>⏰ {fmt12(act.start_time)} - {fmt12(act.end_time)}</span>
+                              </div>
+                              {act.description && <p style={{ margin: '6px 0 0 0', fontSize: 12, color: t.text3, fontStyle: 'italic' }}>"{act.description}"</p>}
+                            </div>
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
             );
           })()}
