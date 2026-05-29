@@ -1,16 +1,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from './supabaseClient';
+import emailjs from '@emailjs/browser';
+import bcrypt from 'bcryptjs';
 
 // ─── Google Fonts ─────────────────────────────────────────────────────────────
 const fontLink = document.createElement('link');
 fontLink.rel = 'stylesheet';
-fontLink.href = 'https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap';
+fontLink.href = 'https://fonts.googleapis.com/css2?family=Sora:wght=300;400;500;600;700&family=JetBrains+Mono:wght=400;600&display=swap';
 document.head.appendChild(fontLink);
 
 // ─── Role helpers ─────────────────────────────────────────────────────────────
-// isAdmin   → full access (Super Admin)
-// isBishop  → can approve/decline, no user mgmt / analytics / audit
-// isNormal  → submit + view own activities
 const isAdmin  = (u) => !!u?.is_admin;
 const isBishop = (u) => !u?.is_admin && u?.role === 'Agent Bishop';
 const canReview = (u) => isAdmin(u) || isBishop(u);
@@ -44,7 +43,7 @@ const getOrgColors = (orgName, dark = true) => {
   return (dark ? darkPalette : lightPalette)[Math.abs(hash) % 7];
 };
 
-const AVAILABLE_VENUES = ["Sacrament Hall","Overflow","Cultural Hall","Relief Society Room","Court"];
+const STAKE_CENTER_VENUES = ["Sacrament Hall", "Overflow", "Cultural Hall", "Relief Society Room", "Courts"];
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -70,7 +69,6 @@ const fmt12 = (t) => {
   return `${h}:${mS} ${ap}`;
 };
 
-// ─── Status chip helper ────────────────────────────────────────────────────────
 const statusChip = (act) => {
   const s = act.status || (act.is_approved ? 'approved' : 'pending');
   if (s==='approved')  return { label:'✓ Approved',  bg:'rgba(16,185,129,0.15)', color:'#10b981', border:'rgba(16,185,129,0.3)' };
@@ -109,7 +107,6 @@ const makeTokens = (dark) => dark ? {
   declinedDateBg:'#fff5f5',
 };
 
-// ─── GlobalStyles ─────────────────────────────────────────────────────────────
 const GlobalStyles = ({ t, dark }) => (
   <style>{`
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
@@ -119,7 +116,7 @@ const GlobalStyles = ({ t, dark }) => (
     ::-webkit-scrollbar-thumb{background:${t.scrollThumb};border-radius:3px;}
     input,select,textarea{font-family:'Sora',sans-serif;background:${t.inputBg}!important;border:1px solid ${t.inputBorder}!important;color:${t.inputColor}!important;border-radius:8px;padding:10px 14px;width:100%;font-size:14px;outline:none;transition:border-color .2s,box-shadow .2s,background .3s;}
     input:focus,select:focus,textarea:focus{border-color:#6366f1!important;box-shadow:0 0 0 3px rgba(99,102,241,.18)!important;}
-    input:disabled,select:disabled,textarea:disabled{opacity:.45;cursor:not-allowed;}
+    input:disabled,select:disabled,textarea:disabled{opacity:.65;cursor:not-allowed;background:rgba(148,163,184,0.05)!important;border-color:rgba(148,163,184,0.15)!important;}
     select option{background:${t.selectOption};color:${t.inputColor};}
     label{display:block;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:${t.labelColor};margin-bottom:6px;}
     .tab-btn{padding:9px 18px;border-radius:8px;border:1px solid transparent;font-family:'Sora',sans-serif;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s;white-space:nowrap;display:flex;align-items:center;gap:6px;}
@@ -159,8 +156,7 @@ const GlobalStyles = ({ t, dark }) => (
     .stat-card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(99,102,241,.12);}
     .badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:.04em;}
     .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,${dark?'.7':'.4'});backdrop-filter:blur(6px);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px;}
-    .modal-card{background:${t.modalBg};border:1px solid ${t.borderAccent};border-radius:16px;padding:28px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 25px 60px rgba(0,0,0,${dark?'.6':'.18'}),0 0 0 1px rgba(99,102,241,.1);}
-    .approval-card{background:${t.surfaceCard};border:1px solid ${t.border};border-radius:12px;overflow:hidden;transition:transform .18s,box-shadow .18s;box-shadow:${dark?'none':'0 1px 4px rgba(15,23,42,.06)'};}
+    .modal-card{background:${t.modalBg};border:1px solid ${t.borderAccent};border-radius:16px;padding:28px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 25px 60px rgba(0,0,0,${dark?'.6':'.18'}),0 0 0 1px rgba(99,102,241,.1);}.approval-card{background:${t.surfaceCard};border:1px solid ${t.border};border-radius:12px;overflow:hidden;transition:transform .18s,box-shadow .18s;box-shadow:${dark?'none':'0 1px 4px rgba(15,23,42,.06)'};}
     .approval-card:hover{transform:translateX(3px);box-shadow:0 4px 16px rgba(99,102,241,.12);}
     .progress-bar-track{background:${t.progressTrack};border-radius:20px;overflow:hidden;height:8px;}
     .progress-bar-fill{height:100%;border-radius:20px;transition:width .6s ease;}
@@ -175,7 +171,6 @@ const GlobalStyles = ({ t, dark }) => (
   `}</style>
 );
 
-// ─── Toast ────────────────────────────────────────────────────────────────────
 const Toast = ({ message }) => {
   if (!message.text) return null;
   const err = message.type==='error';
@@ -186,7 +181,6 @@ const Toast = ({ message }) => {
   );
 };
 
-// ─── Decline Modal ────────────────────────────────────────────────────────────
 const DeclineModal = ({ activity, t, dark, onConfirm, onCancel }) => {
   const [reason, setReason] = useState('');
   return (
@@ -205,7 +199,7 @@ const DeclineModal = ({ activity, t, dark, onConfirm, onCancel }) => {
           <textarea
             value={reason}
             onChange={e=>setReason(e.target.value)}
-            placeholder="Explain why this activity is being declined so the submitter understands what to change..."
+            placeholder="Explain why this activity is being declined..."
             style={{height:100,resize:'vertical'}}
             autoFocus
           />
@@ -223,10 +217,7 @@ const DeclineModal = ({ activity, t, dark, onConfirm, onCancel }) => {
   );
 };
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
-
-  // ── Theme ────────────────────────────────────────────────────────────────────
   const [dark, setDark] = useState(() => {
     const s = localStorage.getItem('stake_theme');
     return s !== null ? s==='dark' : true;
@@ -234,7 +225,6 @@ export default function App() {
   const toggleTheme = () => { const n=!dark; setDark(n); localStorage.setItem('stake_theme',n?'dark':'light'); };
   const t = makeTokens(dark);
 
-  // ── Core state ───────────────────────────────────────────────────────────────
   const [users,setUsers]               = useState([]);
   const [activities,setActivities]     = useState([]);
   const [auditLogs,setAuditLogs]       = useState([]);
@@ -258,19 +248,29 @@ export default function App() {
   const [isUserModalOpen,setIsUserModalOpen]         = useState(false);
   const [editingActivity,setEditingActivity] = useState(null);
   const [conflictError,setConflictError]     = useState('');
+  
+  const [locationType, setLocationType] = useState('');
   const [activityForm,setActivityForm] = useState({
     title:'',description:'',startTime:'08:00',endTime:'10:00',
     organization:'',location:'',status:'pending',decline_reason:'',
   });
   const [isReadOnly,setIsReadOnly]     = useState(false);
   const [editingUser,setEditingUser]   = useState(null);
-  const [userForm,setUserForm]         = useState({username:'',password:'',name:'',calling:'',organization:'',isAdmin:false,role:''});
+  const [userForm,setUserForm]         = useState({username:'',password:'',name:'',calling:'',organization:'',isAdmin:false,role:'', email:''});
   const [isPasswordModalOpen,setIsPasswordModalOpen] = useState(false);
   const [passwordForm,setPasswordForm] = useState({currentPassword:'',newPassword:'',confirmPassword:''});
   const [passwordError,setPasswordError] = useState('');
+  const [accountSettingsTab,setAccountSettingsTab] = useState('password');
+  const [showCurrentPw,setShowCurrentPw] = useState(false);
+  const [showNewPw,setShowNewPw]         = useState(false);
+  const [showConfirmPw,setShowConfirmPw] = useState(false);
+  const [usernameForm,setUsernameForm] = useState({currentPassword:'',newUsername:''});
+  const [usernameError,setUsernameError] = useState('');
+  const [emailForm,setEmailForm] = useState({currentPassword:'',newEmail:''});
+  const [emailError,setEmailError] = useState('');
+  const [declineTarget,setDeclineTarget] = useState(null);
 
-  // ── Decline modal state ───────────────────────────────────────────────────────
-  const [declineTarget,setDeclineTarget] = useState(null); // activity object being declined
+  const [newUserForm, setNewUserForm] = useState({username: '',password: '',role: 'Member',organization: 'General',email: ''});
 
   const showToast = (text, type='success') => {
     setFeedbackMessage({text,type});
@@ -282,9 +282,103 @@ export default function App() {
     catch(err){ console.error('Audit:',err.message); }
   };
 
-  // ── fetchActivities ────────────────────────────────────────────────────────
-  // Admin/Bishop: fetch whole month.
-  // Normal user: fetch ALL their own activities (all months) so "My Activities" tab always works.
+  // ─── Email Notification Integration Helper ──────────────────────────────────
+  const sendApprovalEmail = async (activity) => {
+    try {
+      // 1. Guard: activity must have a user_id to look up the recipient
+      if (!activity.user_id) {
+        console.warn(`sendApprovalEmail: activity "${activity.title}" has no user_id — cannot resolve recipient email. Skipping email.`);
+        showToast('Activity approved, but no email was sent (missing user link on this record).', 'error');
+        return;
+      }
+
+      // 2. Fetch the submitting user's profile (email + name + notification opt-in)
+      const { data: profileData, error: profileError } = await supabase
+        .from('profiles')
+        .select('email, name, email_notifications')
+        .eq('id', activity.user_id)
+        .single();
+
+      if (profileError) {
+        console.error('sendApprovalEmail: Supabase error fetching profile:', profileError.message);
+        showToast('Activity approved, but the recipient profile could not be loaded. Email not sent.', 'error');
+        return;
+      }
+
+      // Respect the user's notification opt-in preference
+      if (profileData?.email_notifications === false) {
+        console.log(`sendApprovalEmail: user ${activity.user_id} has opted out of email notifications. Skipping.`);
+        return;
+      }
+
+      if (!profileData?.email) {
+        console.warn(`sendApprovalEmail: user ${activity.user_id} has no email address on file. Skipping email.`);
+        showToast('Activity approved, but the user has no email address saved — email not sent.', 'error');
+        return;
+      }
+
+      const recipientEmail = profileData.email;
+      const recipientName  = profileData.name || activity.requester_name || 'Applicant';
+
+      // 3. Build CC list: all admins + the approving bishop/agent bishop (currentUser)
+      //    Fetch all admin emails from profiles
+      const { data: adminProfiles } = await supabase
+        .from('profiles')
+        .select('email, name')
+        .eq('is_admin', true);
+
+      const ccEmails = new Set();
+
+      // Add all admin emails
+      (adminProfiles || []).forEach(admin => {
+        if (admin.email) ccEmails.add(admin.email);
+      });
+
+      // Add the approving user's email if they are a bishop/agent bishop
+      // (and they aren't already in the list as an admin)
+      if (isBishop(currentUser) && currentUser.email) {
+        ccEmails.add(currentUser.email);
+      }
+
+      // Remove the recipient from CC to avoid duplicate delivery
+      ccEmails.delete(recipientEmail);
+
+      const ccList = [...ccEmails].join(',');
+
+      console.log(`sendApprovalEmail: to=${recipientEmail} | cc=${ccList || '(none)'}`);
+
+      // 4. Build the EmailJS template params
+      //    NOTE: your EmailJS template must have a {{cc_emails}} variable mapped
+      //    to the "CC" field for this to work.
+      const templateParams = {
+        to_email:        recipientEmail,
+        to_name:         recipientName,
+        cc_emails:       ccList,
+        approval_signer: currentUser?.name || currentUser?.role || 'Administrator',
+        activity_title:  activity.title,
+        organization:    activity.organization || 'General',
+        schedule_date:   activity.date,
+        schedule_time:   `${fmt12(activity.start_time)} - ${fmt12(activity.end_time)}`,
+        venue_location:  activity.location,
+        reply_to:        'no-reply@talisaystakeactivities.vercel.app',
+      };
+
+      // 5. Send via EmailJS
+      const response = await emailjs.send(
+        'service_5wmibq6',
+        'template_ftbz95q',
+        templateParams,
+        'fJih7e_f5TPIx2KU4'
+      );
+
+      console.log('Email sent successfully!', response.status, response.text);
+    } catch (err) {
+      console.error('Email failure:', err);
+      showToast(`Email could not be sent: ${err.text || err.message}`, 'error');
+    }
+  };
+
+  // ─── Fetch Activities Routine ────────────────────────────────────────────────
   const fetchActivities = useCallback(async () => {
     if (!currentUser) return;
     setLoading(true);
@@ -292,30 +386,47 @@ export default function App() {
     const month = String(currentDate.getMonth()+1).padStart(2,'0');
     const last  = String(new Date(year,currentDate.getMonth()+1,0).getDate()).padStart(2,'0');
 
-    // Always fetch the current month for calendar/dashboard
-    const { data:monthData, error:monthError } = await supabase
-      .from('activities').select('*')
-      .gte('date',`${year}-${month}-01`)
-      .lte('date',`${year}-${month}-${last}`);
+    // 1. Core Month Target Query (Stays accessible)
+    const { data: monthData, error: monthError } = await supabase
+        .from('activities').select('*')
+        .gte('date', `${year}-${month}-01`)
+        .lte('date', `${year}-${month}-${last}`);
 
     if (monthError) { setLoading(false); return; }
     let combined = monthData || [];
+    const ids = new Set(combined.map(a => a.id));
 
-    // For normal users also fetch their own activities outside this month
+    // 2. Reviewer Layer: Admins & Bishops fetch ALL pending rows globally
+    if (isAdmin(currentUser) || isBishop(currentUser)) {
+        const { data: pendingGlobalData } = await supabase
+        .from('activities')
+        .select('*')
+        .eq('status', 'pending');
+
+        if (pendingGlobalData) {
+        pendingGlobalData.forEach(a => {
+            if (!ids.has(a.id)) { combined.push(a); ids.add(a.id); }
+        });
+        }
+    }
+
+    // 3. 🌟 REWRITTEN USER LAYER: Fetch public approved records + their own private logs
     if (!isAdmin(currentUser) && !isBishop(currentUser)) {
-      const { data:myData } = await supabase
-        .from('activities').select('*')
-        .eq('user_id', currentUser.id);
-      if (myData) {
-        // Merge, deduplicate by id
-        const ids = new Set(combined.map(a=>a.id));
-        myData.forEach(a => { if (!ids.has(a.id)) combined.push(a); });
-      }
+        const { data: publicAndPrivateData } = await supabase
+        .from('activities')
+        .select('*')
+        .or(`status.eq.approved,user_id.eq.${currentUser.id}`); // 👈 GETS ALL APPROVED + MY ITEMS
+
+        if (publicAndPrivateData) {
+        publicAndPrivateData.forEach(a => {
+            if (!ids.has(a.id)) { combined.push(a); ids.add(a.id); }
+        });
+        }
     }
 
     setActivities(combined);
     setLoading(false);
-  }, [currentUser, currentDate]);
+    }, [currentUser, currentDate]);
 
   const fetchUsers = async () => {
     const { data,error } = await supabase.from('profiles').select('*');
@@ -340,9 +451,9 @@ export default function App() {
     }
   },[currentUser,adminTab]);
 
-  // ── Conflict detection ────────────────────────────────────────────────────────
+  // Conflict Checking
   useEffect(()=>{
-    if (!isActivityModalOpen||isReadOnly) return;
+    if (!isActivityModalOpen||isReadOnly||isBishop(currentUser)) return;
     const check = async () => {
       setConflictError('');
       const s=timeToMinutes(activityForm.startTime), e=timeToMinutes(activityForm.endTime);
@@ -363,9 +474,8 @@ export default function App() {
     };
     const timer=setTimeout(check,400);
     return ()=>clearTimeout(timer);
-  },[activityForm.startTime,activityForm.endTime,activityForm.location,isActivityModalOpen,selectedDateStr,editingActivity,isReadOnly]);
+  },[activityForm.startTime,activityForm.endTime,activityForm.location,isActivityModalOpen,selectedDateStr,editingActivity,isReadOnly,currentUser]);
 
-  // ── Calendar helpers ──────────────────────────────────────────────────────────
   const getDaysInMonth = (date) => {
     const y=date.getFullYear(),m=date.getMonth();
     const days=[];
@@ -377,26 +487,105 @@ export default function App() {
   const calendarDays = getDaysInMonth(currentDate);
   const todayStr = new Date().toISOString().split('T')[0];
 
-  // ── Auth ──────────────────────────────────────────────────────────────────────
-  const handleLogin = async (e) => {
-    e.preventDefault(); setLoginError('');
-    const {data,error} = await supabase.from('profiles').select('*')
-      .eq('username',usernameInput).eq('password',passwordInput).single();
-    if (!error&&data){
-      localStorage.setItem('supabase_user_session',JSON.stringify(data));
-      setCurrentUser(data); showToast(`Welcome back, ${data.name}!`);
-    } else { setLoginError('Invalid credentials. Please try again.'); }
-  };
+    const handleLogin = async (e) => {
+        e.preventDefault(); setLoginError('');
 
-  const handlePasswordRecovery = async (e) => {
-    e.preventDefault(); setLoginError(''); setRecoveryResult(null);
-    const {data,error} = await supabase.from('profiles').select('*')
-      .eq('username',recoveryUser).ilike('organization',recoveryOrg).single();
-    if (!error&&data){
-      const {data:aData}=await supabase.from('profiles').select('name').eq('is_admin',true).limit(1);
-      const token=`RST-${btoa(data.username).slice(0,4).toUpperCase()}-${data.id.slice(0,4).toUpperCase()}`;
-      setRecoveryResult({adminName:aData?.[0]?.name||'Super Admin',token,userName:data.name});
-    } else { setLoginError('Account not found. Check your username and organization.'); }
+        // Fetch the user row by username only — never query by password
+        const { data, error } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('username', usernameInput)
+            .single();
+
+        if (error || !data) { setLoginError('Invalid credentials. Please try again.'); return; }
+
+        // Compare the entered password against the stored hash
+        const match = await bcrypt.compare(passwordInput, data.password);
+        if (!match) { setLoginError('Invalid credentials. Please try again.'); return; }
+
+        localStorage.setItem('supabase_user_session', JSON.stringify(data));
+        setCurrentUser(data);
+        showToast(`Welcome back, ${data.name}!`);
+    };
+
+    const handlePasswordRecovery = async (e) => {
+    e.preventDefault();
+
+    setLoginError('');
+    setRecoveryResult(null);
+
+    try {
+      const { data: user, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('username', recoveryUser)
+        .single();
+
+      if (error || !user) {
+        setLoginError('Account not found.');
+        return;
+      }
+
+      if (!user.email) {
+        setLoginError('This account has no recovery email.');
+        return;
+      }
+
+      const resetToken = crypto.randomUUID();
+
+      const expiresAt = new Date(
+        Date.now() + 1000 * 60 * 15
+      ).toISOString();
+
+      const { error: tokenError } = await supabase
+        .from('password_resets')
+        .insert([
+          {
+            user_id: user.id,
+            token: resetToken,
+            expires_at: expiresAt,
+          },
+        ]);
+
+      if (tokenError) {
+        throw tokenError;
+      }
+
+      const resetLink =
+        `https://talisaystakeactivities.vercel.app/reset-password?token=${resetToken}`;
+
+      const emailResponse = await emailjs.send(
+        'service_5wmibq6',
+        'template_ftbz95q',
+        {
+          to_email: user.email,
+          to_name: user.name || user.username,
+          reset_link: resetLink,
+        },
+        'fJih7e_f5TPIx2KU4'
+      );
+
+      setRecoveryResult({
+        success: true,
+        email: user.email,
+      });
+
+      showToast('Recovery email sent.');
+    } catch (err) {
+      console.error('Password recovery error:', err);
+
+      let errorMessage = 'Something went wrong while sending the recovery email.';
+
+      if (err?.message) {
+        errorMessage = err.message;
+      } else if (err?.text) {
+        errorMessage = err.text;
+      } else if (typeof err === 'string') {
+        errorMessage = err;
+      }
+
+      setLoginError(`Recovery failed: ${errorMessage}`);
+    }
   };
 
   const handleLogout = () => {
@@ -405,7 +594,7 @@ export default function App() {
     setUsernameInput('');setPasswordInput('');setAuthScreen('login');
   };
 
-  // ── Activity CRUD ─────────────────────────────────────────────────────────────
+  // ─── Activity CRUD Setup ───
   const openActivityModal = (dateStr, activity=null) => {
     setSelectedDateStr(dateStr); setConflictError('');
     if (activity){
@@ -420,9 +609,19 @@ export default function App() {
         status:activity.status||(activity.is_approved?'approved':'pending'),
         decline_reason:activity.decline_reason||'',
       });
-      setIsReadOnly(!canReview(currentUser) && activity.user_id!==currentUser?.id);
+      
+      if (STAKE_CENTER_VENUES.includes(activity.location)) {
+        setLocationType('Talisay Stake Center');
+      } else if (activity.location) {
+        setLocationType('Others');
+      } else {
+        setLocationType('');
+      }
+
+      setIsReadOnly(isBishop(currentUser) || (!isAdmin(currentUser) && activity.user_id!==currentUser?.id));
     } else {
       setEditingActivity(null); setIsReadOnly(false);
+      setLocationType('');
       setActivityForm({
         title:'',description:'',startTime:'08:00',endTime:'10:00',
         organization:currentUser?.organization||'',
@@ -436,43 +635,60 @@ export default function App() {
 
   const handleSaveActivity = async (e) => {
     e.preventDefault();
-    if (isReadOnly||conflictError.startsWith('Venue conflict')) return;
+    
+    // 1. Core verification safety check
+    if (!selectedDateStr) {
+        showToast("Please choose a day on the calendar first.", "error");
+        return;
+    }
 
+    // 2. Build a safe data object utilizing only verified database columns
     const payload = {
-      title:        activityForm.title,
-      description:  activityForm.description,
-      start_time:   activityForm.startTime,
-      end_time:     activityForm.endTime,
-      organization: activityForm.organization||currentUser?.organization||'',
-      location:     activityForm.location,
-      date:         selectedDateStr,
-      user_id:      editingActivity?editingActivity.user_id:(currentUser?.id||null),
-      status:       activityForm.status,
-      decline_reason: activityForm.status==='rejected'?activityForm.decline_reason:'',
-      is_approved:  activityForm.status==='approved',
+        title: activityForm.title,
+        description: activityForm.description || '',
+        date: selectedDateStr,                 // 👈 FIX: Uses selectedDateStr from calendar selection state
+        start_time: activityForm.startTime,
+        end_time: activityForm.endTime,
+        location: activityForm.location,
+        organization: currentUser?.organization || 'General',
+        status: isAdmin(currentUser) ? 'approved' : 'pending', // Admins bypass approvals
+        is_approved: isAdmin(currentUser) ? true : false,
+        user_id: currentUser?.id               // 👈 Links row to the creator's profile UUID
     };
 
     try {
-      if (editingActivity){
-        const {data:updated,error}=await supabase.from('activities').update(payload).eq('id',editingActivity.id).select().single();
+        if (editingActivity) {
+        // HANDLE EDITING EXISTING ENTRIES
+        const { data, error } = await supabase
+            .from('activities')
+            .update(payload)
+            .eq('id', editingActivity.id)
+            .select()
+            .single();
+
         if (error) throw error;
-        if (!updated) throw new Error('DB did not update — check Supabase RLS policies.');
-        setActivities(prev=>prev.map(a=>a.id===editingActivity.id?updated:a));
-        await writeAuditLog(currentUser?.id,currentUser?.name,'UPDATE',`Modified: "${activityForm.title}" on ${selectedDateStr}`);
-        showToast('Activity updated.');
-      } else {
-        const {data:inserted,error}=await supabase.from('activities').insert([payload]).select().single();
+        await writeAuditLog(currentUser.id, currentUser.name, 'UPDATE', `Updated activity: "${activityForm.title}"`);
+        showToast('Activity updated successfully.');
+        } else {
+        // HANDLE NEW SUBMISSIONS
+        const { error } = await supabase
+            .from('activities')
+            .insert([payload]);
+
         if (error) throw error;
-        if (inserted) setActivities(prev=>[...prev,inserted]);
-        await writeAuditLog(currentUser?.id,currentUser?.name,'INSERT',`Created: "${activityForm.title}" on ${selectedDateStr}`);
+        await writeAuditLog(currentUser.id, currentUser.name, 'INSERT', `Created activity: "${activityForm.title}"`);
         showToast('Activity submitted for approval.');
-      }
-      setIsActivityModalOpen(false);
-    } catch(err){ showToast(`Error: ${err.message}`,'error'); }
-  };
+        }
+
+        setIsActivityModalOpen(false);
+        fetchActivities(); // Refresh calendar feed with new records
+    } catch (err) {
+        showToast(`Submission failed: ${err.message}`, 'error');
+    }
+    };
 
   const handleDeleteActivity = async (id) => {
-    if (isReadOnly) return;
+    if (isReadOnly || isBishop(currentUser)) return;
     try {
       await supabase.from('activities').delete().eq('id',id);
       setActivities(prev=>prev.filter(a=>a.id!==id));
@@ -481,21 +697,27 @@ export default function App() {
     } catch(err){ showToast(`Cannot delete: ${err.message}`,'error'); }
   };
 
-  // ── Quick Approve ─────────────────────────────────────────────────────────────
-  const handleQuickApprove = async (act) => {
+  const handleQuickApprove = async (activity) => {
     try {
-      const {data:updated,error}=await supabase.from('activities')
-        .update({status:'approved',is_approved:true,decline_reason:''})
-        .eq('id',act.id).select().single();
+      const { data: updated, error } = await supabase
+        .from('activities')
+        .update({ status: 'approved', is_approved: true })
+        .eq('id', activity.id)
+        .select()
+        .single();
+
       if (error) throw error;
-      if (!updated){ showToast('DB did not update — check Supabase RLS policies.','error'); return; }
-      setActivities(prev=>prev.map(a=>a.id===act.id?updated:a));
-      await writeAuditLog(currentUser.id,currentUser.name,'UPDATE',`Approved: "${act.title}" on ${act.date}`);
-      showToast(`"${act.title}" approved — now visible to members.`);
-    } catch(err){ showToast(`Approval failed: ${err.message}`,'error'); }
+
+      setActivities(prev => prev.map(a => a.id === activity.id ? updated : a));
+      await writeAuditLog(currentUser.id, currentUser.name, 'UPDATE', `Approved: "${activity.title}"`);
+      await sendApprovalEmail(updated);
+      showToast(`Activity "${activity.title}" has been approved, and a notification email was sent!`);
+    } catch (error) {
+      console.error("Failed to approve activity or send email:", error);
+      showToast(`Approval failed: ${error.message}`, 'error');
+    }
   };
 
-  // ── Decline flow (opens modal) ────────────────────────────────────────────────
   const handleDeclineConfirm = async (reason) => {
     const act = declineTarget;
     setDeclineTarget(null);
@@ -504,67 +726,153 @@ export default function App() {
         .update({status:'rejected',is_approved:false,decline_reason:reason})
         .eq('id',act.id).select().single();
       if (error) throw error;
-      if (!updated){ showToast('DB did not update — check Supabase RLS policies.','error'); return; }
       setActivities(prev=>prev.map(a=>a.id===act.id?updated:a));
-      // Close activity modal too if it was open
       setIsActivityModalOpen(false);
       await writeAuditLog(currentUser.id,currentUser.name,'UPDATE',`Declined: "${act.title}" — ${reason}`);
       showToast(`"${act.title}" declined.`);
     } catch(err){ showToast(`Decline failed: ${err.message}`,'error'); }
   };
 
-  // ── User CRUD ─────────────────────────────────────────────────────────────────
-  const openUserModal = (user=null) => {
-    if (user){
-      setEditingUser(user);
-      setUserForm({username:user.username,password:user.password,name:user.name,calling:user.calling,organization:user.organization,isAdmin:user.is_admin||false,role:user.role||''});
-    } else {
-      setEditingUser(null);
-      setUserForm({username:'',password:'',name:'',calling:'',organization:'',isAdmin:false,role:''});
-    }
-    setIsUserModalOpen(true);
-  };
+  const openUserModal = (user = null) => {
+  if (user) {
+    setEditingUser(user);
+    setUserForm({
+      username: user.username,
+      password: user.password,
+      name: user.name,
+      calling: user.calling,
+      organization: user.organization,
+      isAdmin: user.is_admin || false,
+      role: user.role || '',
+      email: user.email || '' // 👈 Populate database email
+    });
+  } else {
+    setEditingUser(null);
+    setUserForm({
+      username: '',
+      password: '',
+      name: '',
+      calling: '',
+      organization: '',
+      isAdmin: false,
+      role: '',
+      email: '' // 👈 Reset email on clean create
+    });
+  }
+  setIsUserModalOpen(true);
+};
 
   const handleSaveUser = async (e) => {
     e.preventDefault();
+
+    const hashedPassword = await bcrypt.hash(userForm.password, 10);
+
     const payload = {
-      username:userForm.username,password:userForm.password,name:userForm.name,
-      calling:userForm.calling,organization:userForm.organization,
-      is_admin:userForm.isAdmin,
-      // Agent Bishop role is stored in 'role' column; clear it if admin is checked
-      role:userForm.isAdmin?'':userForm.role,
+        username: userForm.username,
+        password: hashedPassword,
+        name: userForm.name,
+        calling: userForm.calling,
+        organization: userForm.organization,
+        is_admin: userForm.isAdmin,
+        role: userForm.isAdmin ? '' : userForm.role,
+        email: userForm.email
     };
+
     try {
-      if (editingUser){
-        const {error}=await supabase.from('profiles').update(payload).eq('id',editingUser.id);
+        if (editingUser) {
+        const { error } = await supabase.from('profiles').update(payload).eq('id', editingUser.id);
         if (error) throw error;
-        await writeAuditLog(currentUser.id,currentUser.name,'UPDATE',`Updated user: "${userForm.username}"`);
+        await writeAuditLog(currentUser.id, currentUser.name, 'UPDATE', `Updated user: "${userForm.username}"`);
         showToast('User updated.');
-      } else {
-        const {error}=await supabase.from('profiles').insert([payload]);
+        } else {
+        const { error } = await supabase.from('profiles').insert([payload]);
         if (error) throw error;
-        await writeAuditLog(currentUser.id,currentUser.name,'INSERT',`Created user: "${userForm.username}"`);
+        await writeAuditLog(currentUser.id, currentUser.name, 'INSERT', `Created user: "${userForm.username}"`);
         showToast('User created.');
-      }
-      setIsUserModalOpen(false); fetchUsers();
-    } catch(err){ showToast(`Save failed: ${err.message}`,'error'); }
+        }
+        setIsUserModalOpen(false);
+        fetchUsers();
+    } catch (err) {
+        showToast(`Save failed: ${err.message}`, 'error');
+    }
+    };
+
+    const handleUpdatePassword = async (e) => {
+        e.preventDefault(); setPasswordError('');
+
+        // Compare entered password against the stored hash
+        const match = await bcrypt.compare(passwordForm.currentPassword, currentUser.password);
+        if (!match) { setPasswordError('Current password is incorrect.'); return; }
+
+        if (passwordForm.newPassword !== passwordForm.confirmPassword) { setPasswordError('Passwords do not match.'); return; }
+        if (passwordForm.newPassword.length < 4) { setPasswordError('Password must be at least 4 characters.'); return; }
+
+        const hashedNew = await bcrypt.hash(passwordForm.newPassword, 10);
+
+        try {
+            const { error } = await supabase.from('profiles').update({ password: hashedNew }).eq('id', currentUser.id);
+            if (error) throw error;
+            const upd = { ...currentUser, password: hashedNew };
+            localStorage.setItem('supabase_user_session', JSON.stringify(upd));
+            setCurrentUser(upd);
+            await writeAuditLog(currentUser.id, currentUser.name, 'SECURITY', 'Password changed.');
+            showToast('Password updated.'); setIsPasswordModalOpen(false);
+            setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+        } catch (err) { setPasswordError(`Update failed: ${err.message}`); }
+    };
+
+  const handleUpdateUsername = async (e) => {
+    e.preventDefault(); setUsernameError('');
+    const match = await bcrypt.compare(usernameForm.currentPassword, currentUser.password);
+    if (!match) { setUsernameError('Current password is incorrect');return; }
+    if (!usernameForm.newUsername.trim()) { setUsernameError('Username cannot be empty.'); return; }
+    if (usernameForm.newUsername.trim() === currentUser.username) { setUsernameError('New username is the same as your current one.'); return; }
+    // Check uniqueness
+    const { data: existing } = await supabase.from('profiles').select('id').eq('username', usernameForm.newUsername.trim()).single();
+    if (existing) { setUsernameError('That username is already taken. Please choose another.'); return; }
+    try {
+      const { error } = await supabase.from('profiles').update({ username: usernameForm.newUsername.trim() }).eq('id', currentUser.id);
+      if (error) throw error;
+      const upd = { ...currentUser, username: usernameForm.newUsername.trim() };
+      localStorage.setItem('supabase_user_session', JSON.stringify(upd));
+      setCurrentUser(upd);
+      await writeAuditLog(currentUser.id, currentUser.name, 'SECURITY', `Username changed to "${usernameForm.newUsername.trim()}".`);
+      showToast('Username updated successfully.');
+      setUsernameForm({ currentPassword: '', newUsername: '' });
+    } catch (err) { setUsernameError(`Update failed: ${err.message}`); }
   };
 
-  const handleUpdatePassword = async (e) => {
-    e.preventDefault(); setPasswordError('');
-    if (passwordForm.currentPassword!==currentUser.password){setPasswordError('Current password is incorrect.');return;}
-    if (passwordForm.newPassword!==passwordForm.confirmPassword){setPasswordError('New passwords do not match.');return;}
-    if (passwordForm.newPassword.length<4){setPasswordError('Password must be at least 4 characters.');return;}
+  const handleUpdateEmail = async (e) => {
+    e.preventDefault(); setEmailError('');
+    const match = await bcrypt.compare(emailForm.currentPassword, currentUser.password);
+    if (!match) { setEmailError('Current password is incorrect.'); return; }
+    const trimmed = emailForm.newEmail.trim().toLowerCase();
+    if (!trimmed) { setEmailError('Email cannot be empty.'); return; }
+    if (trimmed === (currentUser.email || '').toLowerCase()) { setEmailError('New email is the same as your current one.'); return; }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmed)) { setEmailError('Please enter a valid email address.'); return; }
     try {
-      const {error}=await supabase.from('profiles').update({password:passwordForm.newPassword}).eq('id',currentUser.id);
+      const { error } = await supabase.from('profiles').update({ email: trimmed }).eq('id', currentUser.id);
       if (error) throw error;
-      const upd={...currentUser,password:passwordForm.newPassword};
-      localStorage.setItem('supabase_user_session',JSON.stringify(upd));
+      const upd = { ...currentUser, email: trimmed };
+      localStorage.setItem('supabase_user_session', JSON.stringify(upd));
       setCurrentUser(upd);
-      await writeAuditLog(currentUser.id,currentUser.name,'SECURITY','Password changed.');
-      showToast('Password updated.'); setIsPasswordModalOpen(false);
-      setPasswordForm({currentPassword:'',newPassword:'',confirmPassword:''});
-    } catch(err){setPasswordError(`Update failed: ${err.message}`);}
+      await writeAuditLog(currentUser.id, currentUser.name, 'SECURITY', `Email changed to "${trimmed}".`);
+      showToast('Email updated successfully.');
+      setEmailForm({ currentPassword: '', newEmail: '' });
+    } catch (err) { setEmailError(`Update failed: ${err.message}`); }
+  };
+
+  const handleToggleEmailNotifications = async (newVal) => {
+    try {
+      const { error } = await supabase.from('profiles').update({ email_notifications: newVal }).eq('id', currentUser.id);
+      if (error) throw error;
+      const upd = { ...currentUser, email_notifications: newVal };
+      localStorage.setItem('supabase_user_session', JSON.stringify(upd));
+      setCurrentUser(upd);
+      await writeAuditLog(currentUser.id, currentUser.name, 'SECURITY', `Email notifications ${newVal ? 'enabled' : 'disabled'}.`);
+      showToast(newVal ? 'Email notifications enabled.' : 'Email notifications disabled.');
+    } catch (err) { showToast(`Could not update preference: ${err.message}`, 'error'); }
   };
 
   const handleDeleteUser = async (id) => {
@@ -575,7 +883,6 @@ export default function App() {
     } catch(err){showToast(`Delete failed: ${err.message}`,'error');}
   };
 
-  // ── Analytics ─────────────────────────────────────────────────────────────────
   const getMetrics = () => {
     const total=activities.length, orgMap={};
     let totalMins=0;
@@ -588,15 +895,20 @@ export default function App() {
   };
   const metrics = getMetrics();
 
-  // ── Derived counts ─────────────────────────────────────────────────────────────
-  const pendingCount = activities.filter(a=>!a.is_approved&&a.status!=='rejected').length;
-  // For normal user: their own submissions
+  const pendingActivitiesFiltered = activities.filter(a => {
+    const isPending = a.status === 'pending';
+    if (isBishop(currentUser)) {
+      return isPending && STAKE_CENTER_VENUES.includes(a.location);
+    }
+    return isPending;
+  });
+  const pendingCount = pendingActivitiesFiltered.length;
+
   const myActivities = !isAdmin(currentUser)&&!isBishop(currentUser)
     ? activities.filter(a=>a.user_id===currentUser?.id).sort((a,b)=>b.date?.localeCompare(a.date)||0)
     : [];
-  const myPendingCount = myActivities.filter(a=>a.status==='pending'||(a.status!=='approved'&&a.status!=='rejected'&&!a.is_approved)).length;
+  const myPendingCount = myActivities.filter(a=>a.status==='pending').length;
 
-  // ── Reusable activity card for dashboard / my-activities ──────────────────────
   const ActivityCard = ({act, onClick}) => {
     const p=getOrgColors(act.organization,dark);
     const d=new Date(act.date+'T00:00:00');
@@ -630,9 +942,6 @@ export default function App() {
     );
   };
 
-  // ══════════════════════════════════════════════════════════════════════════════
-  // AUTH SCREEN
-  // ══════════════════════════════════════════════════════════════════════════════
   if (!currentUser){
     return (
       <>
@@ -671,14 +980,45 @@ export default function App() {
                   {loginError&&<div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',color:'#ef4444',fontSize:13}}>{loginError}</div>}
                   {!recoveryResult?(
                     <form onSubmit={handlePasswordRecovery}>
-                      <div style={{marginBottom:16}}><label>Username</label><input type="text" value={recoveryUser} onChange={e=>setRecoveryUser(e.target.value)} required/></div>
-                      <div style={{marginBottom:24}}><label>Organization</label><input type="text" value={recoveryOrg} onChange={e=>setRecoveryOrg(e.target.value)} required/></div>
-                      <button type="submit" className="btn btn-primary" style={{width:'100%',justifyContent:'center',padding:'12px 18px'}}>Locate Account</button>
+                      <div style={{marginBottom:16}}>
+                        <label>Username</label>
+                        <input
+                          type="text"
+                          value={recoveryUser}
+                          onChange={e=>setRecoveryUser(e.target.value)}
+                          required
+                          placeholder="Enter your username"
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        className="btn btn-primary"
+                        style={{width:'100%',justifyContent:'center',padding:'12px 18px'}}
+                      >
+                        Send Recovery Email
+                      </button>
                     </form>
                   ):(
                     <div style={{padding:16,borderRadius:10,background:'rgba(16,185,129,.1)',border:'1px solid rgba(16,185,129,.25)'}}>
-                      <p style={{fontSize:13,marginBottom:10,color:t.text2}}>Account found for <strong style={{color:t.text1}}>{recoveryResult.userName}</strong>. Show this token to your administrator:</p>
-                      <div className="mono" style={{fontSize:16,fontWeight:700,color:'#10b981',letterSpacing:'.1em',padding:'8px 12px',background:'rgba(16,185,129,.08)',borderRadius:8,textAlign:'center'}}>{recoveryResult.token}</div>
+                      <div style={{padding:16,borderRadius:10,background:'rgba(16,185,129,.1)',border:'1px solid rgba(16,185,129,.25)'}}>
+                      <p style={{fontSize:13,color:t.text2}}>
+                        A recovery email has been sent to:
+                      </p>
+
+                      <div
+                        className="mono"
+                        style={{
+                          fontSize:14,
+                          fontWeight:700,
+                          color:'#10b981',
+                          marginTop:10,
+                          textAlign:'center'
+                        }}
+                      >
+                        {recoveryResult.email}
+                      </div>
+                    </div>
                     </div>
                   )}
                   <div style={{textAlign:'center',marginTop:20}}>
@@ -693,23 +1033,15 @@ export default function App() {
     );
   }
 
-  // ══════════════════════════════════════════════════════════════════════════════
-  // MAIN APP
-  // ══════════════════════════════════════════════════════════════════════════════
-
-  // Tab definitions per role
   const tabs = [
     { key:'dashboard', label:'⬡ Dashboard' },
     { key:'calendar',  label:'⊞ Calendar'  },
-    // Normal user only: My Activities
     ...(!isAdmin(currentUser)&&!isBishop(currentUser) ? [
       { key:'myactivities', label:`◉ My Activities${myPendingCount>0?` (${myPendingCount})`:''}` },
     ] : []),
-    // Bishop + Admin: Approvals
     ...(canReview(currentUser) ? [
       { key:'approvals', label:`✦ Approvals${pendingCount>0?` (${pendingCount})`:''}` },
     ] : []),
-    // Admin only
     ...(isAdmin(currentUser) ? [
       { key:'users',     label:'◈ Users'      },
       { key:'analytics', label:'▲ Analytics'  },
@@ -717,7 +1049,6 @@ export default function App() {
     ] : []),
   ];
 
-  // Role badge shown in header
   const roleBadge = isAdmin(currentUser)
     ? { label:'ADMIN',  bg:'rgba(99,102,241,.15)', color:'#6366f1', border:'rgba(99,102,241,.3)' }
     : isBishop(currentUser)
@@ -730,19 +1061,21 @@ export default function App() {
       <div className="network-bg"/>
       <Toast message={feedbackMessage}/>
 
-      {/* Decline modal — rendered at top level so it floats above everything */}
       {declineTarget && (
         <DeclineModal
-          activity={declineTarget}
-          t={t} dark={dark}
-          onConfirm={handleDeclineConfirm}
-          onCancel={()=>setDeclineTarget(null)}
+            activity={declineTarget}
+            t={t} dark={dark}
+            onConfirm={handleDeclineConfirm}
+            onCancel={() => {
+            setDeclineTarget(null);
+            if (declineTarget.date) {
+                openActivityModal(declineTarget.date, declineTarget);
+            }
+            }}
         />
       )}
 
       <div style={{minHeight:'100vh',position:'relative',zIndex:1}}>
-
-        {/* ── Header ── */}
         <header style={{background:t.headerBg,borderBottom:`1px solid ${t.border}`,backdropFilter:'blur(16px)',padding:'0 24px',height:64,display:'flex',alignItems:'center',justifyContent:'space-between',position:'sticky',top:0,zIndex:100,boxShadow:`0 1px 0 ${t.border}`}}>
           <div style={{display:'flex',alignItems:'center',gap:12}}>
             <div style={{width:36,height:36,borderRadius:10,background:'linear-gradient(135deg,#6366f1,#4f46e5)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18,boxShadow:'0 4px 12px rgba(99,102,241,.35)',flexShrink:0}}>⛪</div>
@@ -757,31 +1090,28 @@ export default function App() {
           <div style={{display:'flex',gap:8,alignItems:'center'}}>
             <div style={{display:'flex',alignItems:'center',gap:6,marginRight:4}}>
               <span style={{fontSize:11,color:t.text3}}>{dark?'🌙':'☀️'}</span>
-              <button className="theme-toggle" onClick={toggleTheme} title={dark?'Switch to light mode':'Switch to dark mode'}/>
+              <button className="theme-toggle" onClick={toggleTheme}/>
             </div>
-            <button className="btn btn-ghost" style={{fontSize:12}} onClick={()=>{setPasswordError('');setIsPasswordModalOpen(true);}}>⚙ Password</button>
+            <button className="btn btn-ghost" style={{fontSize:12}} onClick={()=>{setPasswordError('');setUsernameError('');setEmailError('');setAccountSettingsTab('password');setIsPasswordModalOpen(true);}}>⚙ Account</button>
             <button className="btn btn-danger" style={{fontSize:12}} onClick={handleLogout}>Sign Out</button>
           </div>
         </header>
 
-        {/* ── Tab bar ── */}
         <div style={{display:'flex',gap:4,padding:'10px 24px',overflowX:'auto',background:t.tabBg,borderBottom:`1px solid ${t.border}`}}>
           {tabs.map(tb=>(
             <button key={tb.key} className={`tab-btn ${adminTab===tb.key?'active':'inactive'}`} onClick={()=>setAdminTab(tb.key)}>{tb.label}</button>
           ))}
         </div>
 
-        {/* ── Main ── */}
         <main style={{padding:'28px 24px',maxWidth:1280,margin:'0 auto'}} className="fade-in">
           {loading&&<div style={{display:'flex',alignItems:'center',gap:8,marginBottom:20,color:'#6366f1',fontSize:13}}><span style={{animation:'pulse-dot 1s ease infinite'}}>●</span> Loading…</div>}
 
-          {/* ── DASHBOARD ── */}
-          {adminTab==='dashboard'&&(()=>{
+          {/* ── Dashboard view ── */}
+          {adminTab==='dashboard'&&(() => {
             const filtered=(activities||[])
               .filter(a=>{
                 if (!a?.date) return false;
                 const future=a.date>=todayStr;
-                // Admin/Bishop: see everything upcoming. Normal user: only approved.
                 if (canReview(currentUser)) return future;
                 return future && a.is_approved===true;
               })
@@ -810,7 +1140,7 @@ export default function App() {
             );
           })()}
 
-          {/* ── CALENDAR ── */}
+          {/* ── Calendar view ── */}
           {adminTab==='calendar'&&(
             <div>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:24}}>
@@ -853,9 +1183,9 @@ export default function App() {
             </div>
           )}
 
-          {/* ── MY ACTIVITIES (normal user only) ── */}
-          {adminTab==='myactivities'&&!isAdmin(currentUser)&&!isBishop(currentUser)&&(()=>{
-            const pending  = myActivities.filter(a=>a.status==='pending'||(a.status!=='approved'&&a.status!=='rejected'&&!a.is_approved));
+          {/* ── My Submissions tier view ── */}
+          {adminTab==='myactivities'&&!isAdmin(currentUser)&&!isBishop(currentUser)&&(() => {
+            const pending  = myActivities.filter(a=>a.status==='pending');
             const approved = myActivities.filter(a=>a.status==='approved'||a.is_approved===true);
             const declined = myActivities.filter(a=>a.status==='rejected');
             const Section = ({title,color,items,emptyMsg}) => (
@@ -876,7 +1206,7 @@ export default function App() {
               <div>
                 <div style={{marginBottom:28}}>
                   <h2 style={{fontSize:22,fontWeight:700,color:t.text1,marginBottom:4}}>My Submitted Activities</h2>
-                  <p style={{fontSize:13,color:t.text3}}>Track the status of all activities you have submitted.</p>
+                  <p style={{fontSize:13,color:t.text3}}>Track your submitted item review statuses.</p>
                 </div>
                 <Section title="⏳ Pending Review" color="#f59e0b" items={pending} emptyMsg="No activities awaiting review."/>
                 <Section title="✓ Approved"        color="#10b981" items={approved} emptyMsg="No approved activities yet."/>
@@ -885,20 +1215,23 @@ export default function App() {
             );
           })()}
 
-          {/* ── APPROVALS (Admin + Bishop) ── */}
-          {adminTab==='approvals'&&canReview(currentUser)&&(()=>{
-            const pending=activities.filter(a=>a.status==='pending'||(a.status!=='approved'&&a.status!=='rejected'&&!a.is_approved)).sort((a,b)=>a.date.localeCompare(b.date));
+          {/* ── Approvals queue ── */}
+          {adminTab==='approvals'&&canReview(currentUser)&&(() => {
             return (
               <div>
                 <div style={{marginBottom:24}}>
-                  <h2 style={{fontSize:22,fontWeight:700,color:t.text1,marginBottom:4}}>Pending Approvals</h2>
-                  <p style={{fontSize:13,color:t.text3}}>Review, approve, or decline activity requests before they appear publicly.</p>
+                  <h2 style={{fontSize:22,fontWeight:700,color:t.text1,marginBottom:4}}>Pending Approvals ({pendingCount})</h2>
+                  <p style={{fontSize:13,color:t.text3}}>
+                    {isBishop(currentUser) 
+                      ? 'Review and manage facility requests inside Talisay Stake Center.' 
+                      : 'Pending Activities that need to be approved'}
+                  </p>
                 </div>
-                {pending.length===0?(
-                  <div style={{padding:'60px 40px',textAlign:'center',background:t.surfaceCard,borderRadius:14,border:`1px dashed ${t.emptyBorder}`,color:t.emptyColor,fontSize:14}}>🎉 No pending requests. All clear!</div>
+                {pendingActivitiesFiltered.length===0?(
+                  <div style={{padding:'60px 40px',textAlign:'center',background:t.surfaceCard,borderRadius:14,border:`1px dashed ${t.emptyBorder}`,color:t.emptyColor,fontSize:14}}>🎉 No pending requests to evaluate.</div>
                 ):(
                   <div style={{display:'flex',flexDirection:'column',gap:12}}>
-                    {pending.map(act=>{
+                    {pendingActivitiesFiltered.map(act=>{
                       const p=getOrgColors(act.organization,dark);
                       const d=new Date(act.date+'T00:00:00');
                       return (
@@ -922,7 +1255,9 @@ export default function App() {
                               <div style={{display:'flex',gap:8,marginLeft:16,flexShrink:0,flexWrap:'wrap',justifyContent:'flex-end'}}>
                                 <button className="btn btn-success" style={{fontSize:12,padding:'8px 14px'}} onClick={()=>handleQuickApprove(act)}>✓ Approve</button>
                                 <button className="btn btn-danger"  style={{fontSize:12,padding:'8px 14px'}} onClick={()=>setDeclineTarget(act)}>✕ Decline</button>
-                                <button className="btn btn-ghost"   style={{fontSize:12,padding:'8px 14px'}} onClick={()=>openActivityModal(act.date,act)}>Edit</button>
+                                <button className="btn btn-ghost"   style={{fontSize:12,padding:'8px 14px'}} onClick={()=>openActivityModal(act.date,act)}>
+                                  {isBishop(currentUser) ? 'View Info' : 'Edit'}
+                                </button>
                               </div>
                             </div>
                           </div>
@@ -935,17 +1270,16 @@ export default function App() {
             );
           })()}
 
-          {/* ── USERS (Admin only) ── */}
+          {/* ── Users Management view ── */}
           {adminTab==='users'&&isAdmin(currentUser)&&(
             <div>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:24}}>
                 <div>
                   <h2 style={{fontSize:22,fontWeight:700,color:t.text1,marginBottom:4}}>User Management</h2>
-                  <p style={{fontSize:13,color:t.text3}}>Manage member accounts, access levels, and roles.</p>
                 </div>
                 <button className="btn btn-success" onClick={()=>openUserModal()}>+ Add User</button>
               </div>
-              <div style={{background:t.sectionBg,borderRadius:12,border:`1px solid ${t.border}`,overflow:'hidden',boxShadow:dark?'none':'0 1px 4px rgba(15,23,42,.06)'}}>
+              <div style={{background:t.sectionBg,borderRadius:12,border:`1px solid ${t.border}`,overflow:'hidden'}}>
                 <table className="data-table">
                   <thead><tr><th>Name</th><th>Username</th><th>Calling</th><th>Organization</th><th>Role</th><th>Actions</th></tr></thead>
                   <tbody>
@@ -953,13 +1287,13 @@ export default function App() {
                       <tr key={u.id}>
                         <td style={{color:t.text1,fontWeight:600}}>{u.name}</td>
                         <td className="mono" style={{fontSize:12}}>{u.username}</td>
-                        <td style={{color:t.text2}}>{u.calling||<span style={{color:t.text3}}>—</span>}</td>
-                        <td style={{color:t.text2}}>{u.organization||<span style={{color:t.text3}}>—</span>}</td>
+                        <td>{u.calling||<span style={{color:t.text3}}>—</span>}</td>
+                        <td>{u.organization||<span style={{color:t.text3}}>—</span>}</td>
                         <td>
                           {u.is_admin
                             ?<span className="badge" style={{background:'rgba(99,102,241,.15)',color:'#6366f1',border:'1px solid rgba(99,102,241,.3)'}}>Admin</span>
                             :u.role==='Agent Bishop'
-                            ?<span className="badge" style={{background:'rgba(6,182,212,.15)',color:'#06b6d4',border:'1px solid rgba(6,182,212,.3)'}}>Agent Bishop</span>
+                            ?<span className="badge" style={{background:'rgba(6,182,212,.15)',color:'#06b6d4',border:'1px solid rgba(6,182,212,.3)'}}>Approving Bishop</span>
                             :<span className="badge" style={{background:dark?'rgba(30,41,59,.8)':'#f1f5f9',color:t.text3,border:`1px solid ${t.border}`}}>Member</span>
                           }
                         </td>
@@ -977,12 +1311,12 @@ export default function App() {
             </div>
           )}
 
-          {/* ── ANALYTICS (Admin only) ── */}
+          {/* ── Analytics view ── */}
           {adminTab==='analytics'&&isAdmin(currentUser)&&(
             <div>
               <div style={{marginBottom:24}}>
                 <h2 style={{fontSize:22,fontWeight:700,color:t.text1,marginBottom:4}}>Analytics</h2>
-                <p style={{fontSize:13,color:t.text3}}>Activity metrics for {MONTH_NAMES[currentDate.getMonth()]} {currentDate.getFullYear()}.</p>
+                <p style={{fontSize:13,color:t.text3}}>Metrics dashboard for {MONTH_NAMES[currentDate.getMonth()]} {currentDate.getFullYear()}.</p>
               </div>
               <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:16,marginBottom:32}}>
                 {[
@@ -997,7 +1331,7 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              <div style={{background:t.sectionBg,border:`1px solid ${t.border}`,borderRadius:12,padding:24,boxShadow:dark?'none':'0 1px 4px rgba(15,23,42,.06)'}}>
+              <div style={{background:t.sectionBg,border:`1px solid ${t.border}`,borderRadius:12,padding:24}}>
                 <h3 style={{fontSize:15,fontWeight:700,color:t.text1,marginBottom:20}}>Activity by Organization</h3>
                 <div style={{display:'flex',flexDirection:'column',gap:14}}>
                   {Object.entries(metrics.orgMap).map(([org,count])=>{
@@ -1016,17 +1350,16 @@ export default function App() {
             </div>
           )}
 
-          {/* ── AUDIT (Admin only) ── */}
+          {/* ── Audit records log view ── */}
           {adminTab==='audit'&&isAdmin(currentUser)&&(
             <div>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:24}}>
                 <div>
                   <h2 style={{fontSize:22,fontWeight:700,color:t.text1,marginBottom:4}}>Audit Logs</h2>
-                  <p style={{fontSize:13,color:t.text3}}>A record of all data modifications.</p>
                 </div>
                 <button className="btn btn-ghost" onClick={fetchAuditLogs}>↻ Refresh</button>
               </div>
-              <div style={{background:t.sectionBg,borderRadius:12,border:`1px solid ${t.border}`,overflow:'hidden',maxHeight:560,overflowY:'auto',boxShadow:dark?'none':'0 1px 4px rgba(15,23,42,.06)'}}>
+              <div style={{background:t.sectionBg,borderRadius:12,border:`1px solid ${t.border}`,overflow:'hidden',maxHeight:560,overflowY:'auto'}}>
                 <table className="data-table">
                   <thead><tr><th>Timestamp</th><th>Operator</th><th>Action</th><th>Description</th></tr></thead>
                   <tbody>
@@ -1049,24 +1382,27 @@ export default function App() {
         </main>
       </div>
 
-      {/* ════════════════════════════ MODALS ════════════════════════════ */}
+      {/* ════════════════════════════ MODALS SECTION ════════════════════════════ */}
 
-      {/* Activity Modal */}
+      {/* Activity Details Display / Processing Modal Checkpoint */}
       {isActivityModalOpen&&(
         <div className="modal-overlay" onClick={()=>setIsActivityModalOpen(false)}>
           <div className="modal-card slide-up" onClick={e=>e.stopPropagation()}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
               <h3 style={{fontSize:18,fontWeight:700,color:t.text1}}>
-                {editingActivity?(isReadOnly?'📋 Activity Details':'✎ Edit Activity'):'+ New Activity'}
+                {editingActivity ? (isReadOnly ? '📋 Activity Review Panel' : '✎ Edit Activity') : '+ New Activity'}
               </h3>
               <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                {isReadOnly&&<span className="badge" style={{background:'rgba(245,158,11,.15)',color:'#f59e0b',border:'1px solid rgba(245,158,11,.3)',fontSize:10}}>VIEW ONLY</span>}
+                {isReadOnly && (
+                  <span className="badge" style={{background:'rgba(245,158,11,.15)',color:'#f59e0b',border:'1px solid rgba(245,158,11,.3)',fontSize:10}}>
+                    {isBishop(currentUser) ? 'BISHOP REVIEW' : 'READ ONLY'}
+                  </span>
+                )}
                 <button className="btn btn-ghost" style={{padding:'6px 10px',fontSize:16}} onClick={()=>setIsActivityModalOpen(false)}>✕</button>
               </div>
             </div>
             {conflictError&&<div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',color:'#ef4444',fontSize:13}}>⚠ {conflictError}</div>}
 
-            {/* Show decline reason banner if the activity was rejected */}
             {editingActivity&&(editingActivity.status==='rejected')&&editingActivity.decline_reason&&(
               <div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:'rgba(239,68,68,.08)',border:'1px solid rgba(239,68,68,.2)',fontSize:13,color:'#ef4444'}}>
                 <strong>✕ Declined:</strong> {editingActivity.decline_reason}
@@ -1074,76 +1410,109 @@ export default function App() {
             )}
 
             <form onSubmit={handleSaveActivity}>
-              <div style={{marginBottom:14}}><label>Activity Title</label><input type="text" value={activityForm.title} onChange={e=>setActivityForm({...activityForm,title:e.target.value})} required disabled={isReadOnly} placeholder="Enter title"/></div>
-              <div style={{marginBottom:14}}><label>Description</label><textarea value={activityForm.description} onChange={e=>setActivityForm({...activityForm,description:e.target.value})} disabled={isReadOnly} style={{height:70,resize:'none'}} placeholder="Description of the Activity"/></div>
+              <div style={{marginBottom:14}}><label>Activity Title</label><input type="text" value={activityForm.title} onChange={e=>setActivityForm({...activityForm,title:e.target.value})} required disabled={isReadOnly} placeholder="Title"/></div>
+              <div style={{marginBottom:14}}><label>Description</label><textarea value={activityForm.description} onChange={e=>setActivityForm({...activityForm,description:e.target.value})} disabled={isReadOnly} style={{height:70,resize:'none'}} placeholder="Description text context..."/></div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:14}}>
                 <div><label>Start Time</label><input type="time" value={activityForm.startTime} onChange={e=>setActivityForm({...activityForm,startTime:e.target.value})} required disabled={isReadOnly}/></div>
                 <div><label>End Time</label><input type="time" value={activityForm.endTime} onChange={e=>setActivityForm({...activityForm,endTime:e.target.value})} required disabled={isReadOnly}/></div>
               </div>
-              {/* Venue */}
+              
               <div style={{marginBottom:14}}>
-                <label>Location / Venue</label>
+                <label>Location Classification</label>
                 <select
-                  value={AVAILABLE_VENUES.includes(activityForm.location)||activityForm.location===''?activityForm.location:'Other'}
-                  onChange={e=>{const v=e.target.value; setActivityForm({...activityForm,location:v==='Other'?'':v});}}
-                  disabled={isReadOnly} required
+                  value={locationType}
+                  onChange={e => {
+                    const type = e.target.value;
+                    setLocationType(type);
+                    setActivityForm(prev => ({ ...prev, location: '' }));
+                  }}
+                  disabled={isReadOnly}
+                  required
                 >
-                  <option value="" disabled hidden>Select a venue...</option>
-                  {AVAILABLE_VENUES.map(v=><option key={v} value={v}>{v}</option>)}
-                  <option value="Other">Other (Custom Location...)</option>
+                  <option value="" disabled hidden>Choose Classification...</option>
+                  <option value="Talisay Stake Center">Talisay Stake Center</option>
+                  <option value="Others">Others</option>
                 </select>
-                {!AVAILABLE_VENUES.includes(activityForm.location)&&activityForm.location!==undefined&&(
-                  <div style={{marginTop:10}}>
-                    <label style={{fontSize:'10px',color:'#6366f1'}}>Specify Custom Location</label>
-                    <input type="text" placeholder="e.g., Room 302, Zoom link..." value={activityForm.location} onChange={e=>setActivityForm({...activityForm,location:e.target.value})} disabled={isReadOnly} required/>
-                  </div>
-                )}
               </div>
+
+              {locationType === 'Talisay Stake Center' && (
+                <div style={{marginBottom:14, animation:'fadeIn .2s ease'}}>
+                  <label>Stake Center Facility Room</label>
+                  <select
+                    value={STAKE_CENTER_VENUES.includes(activityForm.location) ? activityForm.location : ''}
+                    onChange={e => setActivityForm({ ...activityForm, location: e.target.value })}
+                    disabled={isReadOnly}
+                    required
+                  >
+                    <option value="" disabled hidden>Select Facility...</option>
+                    {STAKE_CENTER_VENUES.map(v => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </div>
+              )}
+
+              {locationType === 'Others' && (
+                <div style={{marginBottom:14, animation:'fadeIn .2s ease'}}>
+                  <label>Venue Custom Location Address</label>
+                  <input
+                    type="text"
+                    placeholder="Enter custom location details..."
+                    value={activityForm.location}
+                    onChange={e => setActivityForm({ ...activityForm, location: e.target.value })}
+                    disabled={isReadOnly}
+                    required
+                  />
+                </div>
+              )}
+
               <div style={{marginBottom:14}}><label>Organization</label><input type="text" value={activityForm.organization} disabled/></div>
               <div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:dark?'rgba(99,102,241,.08)':'#ede9fe',border:'1px solid rgba(99,102,241,.2)',fontSize:13,color:'#6366f1',display:'flex',alignItems:'center',gap:8}}>
                 ⧗ Duration: <strong>{calcDuration(activityForm.startTime,activityForm.endTime)}</strong>
               </div>
 
-              {/* Approval / status control — Admin and Bishop */}
               {canReview(currentUser)&&(
                 <div style={{marginBottom:20}}>
-                  <label>Status</label>
+                  <label>Action Controls</label>
                   <div style={{display:'flex',gap:8}}>
                     {[
-                      {val:'approved', label:'✓ Approve',  cls:'btn-success'},
-                      {val:'pending',  label:'⏳ Pending',  cls:'btn-warning'},
-                      {val:'rejected', label:'✕ Decline',  cls:'btn-danger' },
+                      {val:'approved', label:'✓ Approve Activity', cls:'btn-success'},
+                      {val:'rejected', label:'✕ Decline Activity', cls:'btn-danger' },
                     ].map(opt=>(
                       <button
                         key={opt.val}
                         type="button"
                         className={`btn ${activityForm.status===opt.val?opt.cls:'btn-ghost'}`}
-                        style={{fontSize:12,padding:'7px 14px',opacity:activityForm.status===opt.val?1:.6}}
+                        style={{fontSize:12,padding:'8px 16px',flex:1,opacity:activityForm.status===opt.val?1:.6}}
                         onClick={()=>{
-                          if (opt.val==='rejected'&&editingActivity){
-                            // Trigger the dedicated decline modal with reason textbox
-                            setDeclineTarget(editingActivity);
-                          } else {
-                            setActivityForm({...activityForm,status:opt.val});
-                          }
+                            if (opt.val==='rejected'&&editingActivity){
+                                setDeclineTarget(editingActivity);
+                                setIsActivityModalOpen(false);
+                            } else {
+                                setActivityForm({...activityForm,status:opt.val});
+                            }
                         }}
                       >{opt.label}</button>
                     ))}
                   </div>
-                  {activityForm.status==='rejected'&&(
-                    <div style={{marginTop:10}}>
-                      <label>Decline Reason</label>
-                      <textarea value={activityForm.decline_reason} onChange={e=>setActivityForm({...activityForm,decline_reason:e.target.value})} style={{height:70,resize:'vertical'}} placeholder="Required: explain why this activity is declined..."/>
-                    </div>
-                  )}
                 </div>
               )}
 
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                <div>{editingActivity&&!isReadOnly&&<button type="button" className="btn btn-danger" onClick={()=>handleDeleteActivity(editingActivity.id)}>Delete</button>}</div>
+                <div>
+                  {editingActivity && !isReadOnly && !isBishop(currentUser) && (
+                    <button type="button" className="btn btn-danger" onClick={()=>handleDeleteActivity(editingActivity.id)}>
+                      Delete
+                    </button>
+                  )}
+                </div>
                 <div style={{display:'flex',gap:10}}>
-                  <button type="button" className="btn btn-ghost" onClick={()=>setIsActivityModalOpen(false)}>{isReadOnly?'Close':'Cancel'}</button>
-                  {!isReadOnly&&<button type="submit" className="btn btn-success" disabled={conflictError.startsWith('Venue conflict')||(activityForm.status==='rejected'&&!activityForm.decline_reason.trim())}>Save Activity</button>}
+                  <button type="button" className="btn btn-ghost" onClick={()=>setIsActivityModalOpen(false)}>
+                    {isReadOnly?'Close':'Cancel'}
+                  </button>
+                  {!isReadOnly && !isBishop(currentUser) && (
+                    <button type="submit" className="btn btn-success" disabled={conflictError.startsWith('Venue conflict')}>
+                      Save Activity
+                    </button>
+                  )}
                 </div>
               </div>
             </form>
@@ -1151,7 +1520,7 @@ export default function App() {
         </div>
       )}
 
-      {/* User Modal */}
+      {/* User Editing Modal Container node */}
       {isUserModalOpen&&(
         <div className="modal-overlay" onClick={()=>setIsUserModalOpen(false)}>
           <div className="modal-card slide-up" onClick={e=>e.stopPropagation()}>
@@ -1160,12 +1529,14 @@ export default function App() {
               <button className="btn btn-ghost" style={{padding:'6px 10px',fontSize:16}} onClick={()=>setIsUserModalOpen(false)}>✕</button>
             </div>
             <form onSubmit={handleSaveUser}>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:14}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:14}}>
                 <div><label>Full Name</label><input type="text" value={userForm.name} onChange={e=>setUserForm({...userForm,name:e.target.value})} required/></div>
                 <div><label>Calling</label><input type="text" value={userForm.calling} onChange={e=>setUserForm({...userForm,calling:e.target.value})} required/></div>
-              </div>
-              <div style={{marginBottom:14}}><label>Organization</label><input type="text" value={userForm.organization} onChange={e=>setUserForm({...userForm,organization:e.target.value})} required/></div>
-              <div style={{height:1,background:t.divider,marginBottom:14}}/>
+            </div>
+            <div style={{marginBottom:14}}><label>Organization</label><input type="text" value={userForm.organization} onChange={e=>setUserForm({...userForm,organization:e.target.value})} required/></div>
+            <div style={{height:1,background:t.divider,marginBottom:14}}/>
+            <div style={{ marginBottom: 14 }}><label>Email Address</label><input type="email" placeholder="user@example.com" value={userForm.email} onChange={e => setUserForm({ ...userForm, email: e.target.value })} />
+            </div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:14}}>
                 <div><label>Username</label><input type="text" value={userForm.username} onChange={e=>setUserForm({...userForm,username:e.target.value})} required disabled={editingUser?.username==='admin'}/></div>
                 <div><label>Password</label><input type="password" value={userForm.password} onChange={e=>setUserForm({...userForm,password:e.target.value})} required/></div>
@@ -1175,17 +1546,17 @@ export default function App() {
                   <label style={{marginBottom:10}}>Role / Access Level</label>
                   <div style={{display:'flex',flexDirection:'column',gap:8}}>
                     {[
-                      {val:'',              label:'Member',        desc:'Can submit activities and view approved ones.',           bg:'rgba(148,163,184,.1)', color:t.text2, border:t.border },
-                      {val:'Agent Bishop',  label:'Agent Bishop',  desc:'Can approve and decline activities. No admin access.',  bg:'rgba(6,182,212,.1)',   color:'#06b6d4', border:'rgba(6,182,212,.3)' },
-                      {val:'__admin__',     label:'Administrator', desc:'Full system access including users and audit logs.',     bg:'rgba(99,102,241,.1)',  color:'#6366f1', border:'rgba(99,102,241,.3)' },
+                      {val:'',              label:'Member',        desc:'Submit activities and monitor individual requests.', bg:'rgba(148,163,184,.1)', color:t.text2, border:t.border },
+                      {val:'Agent Bishop',  label:'Agent Bishop',  desc:'Approve and decline activities under Stake Center.',  bg:'rgba(6,182,212,.1)',   color:'#06b6d4', border:'rgba(6,182,212,.3)' },
+                      {val:'__admin__',     label:'Administrator', desc:'Full parameters system superuser configuration layout.', bg:'rgba(99,102,241,.1)',  color:'#6366f1', border:'rgba(99,102,241,.3)' },
                     ].map(opt=>{
                       const selected = opt.val==='__admin__' ? userForm.isAdmin : (!userForm.isAdmin && userForm.role===opt.val);
                       return (
                         <div key={opt.val} onClick={()=>{
                           if (opt.val==='__admin__') setUserForm({...userForm,isAdmin:true,role:''});
                           else setUserForm({...userForm,isAdmin:false,role:opt.val});
-                        }} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 14px',borderRadius:8,cursor:'pointer',background:selected?opt.bg:'transparent',border:`1px solid ${selected?opt.border:t.border}`,transition:'all .15s'}}>
-                          <div style={{width:16,height:16,borderRadius:'50%',border:`2px solid ${selected?opt.color:t.text3}`,background:selected?opt.color:'transparent',flexShrink:0,transition:'all .15s'}}/>
+                        }} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 14px',borderRadius:8,cursor:'pointer',background:selected?opt.bg:'transparent',border:`1px solid ${selected?opt.border:t.border}`}}>
+                          <div style={{width:16,height:16,borderRadius:'50%',border:`2px solid ${selected?opt.color:t.text3}`,background:selected?opt.color:'transparent'}}/>
                           <div>
                             <div style={{fontSize:13,fontWeight:700,color:selected?opt.color:t.text1}}>{opt.label}</div>
                             <div style={{fontSize:11,color:t.text3,marginTop:2}}>{opt.desc}</div>
@@ -1196,7 +1567,7 @@ export default function App() {
                   </div>
                 </div>
               ):(
-                <p style={{fontSize:12,color:t.text3,fontStyle:'italic',marginBottom:20}}>Root admin privileges cannot be modified.</p>
+                <p style={{fontSize:12,color:t.text3,fontStyle:'italic',marginBottom:20}}>Root admin privileges locked.</p>
               )}
               <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
                 <button type="button" className="btn btn-ghost" onClick={()=>setIsUserModalOpen(false)}>Cancel</button>
@@ -1207,25 +1578,168 @@ export default function App() {
         </div>
       )}
 
-      {/* Password Modal */}
+      {/* Account Settings Modal — Password / Username / Email */}
       {isPasswordModalOpen&&(
         <div className="modal-overlay" onClick={()=>setIsPasswordModalOpen(false)}>
           <div className="modal-card slide-up" onClick={e=>e.stopPropagation()}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
-              <h3 style={{fontSize:18,fontWeight:700,color:t.text1}}>⚙ Change Password</h3>
-              <button className="btn btn-ghost" style={{padding:'6px 10px',fontSize:16}} onClick={()=>{setIsPasswordModalOpen(false);setPasswordForm({currentPassword:'',newPassword:'',confirmPassword:''});}}>✕</button>
+              <h3 style={{fontSize:18,fontWeight:700,color:t.text1}}>⚙ Account Settings</h3>
+              <button className="btn btn-ghost" style={{padding:'6px 10px',fontSize:16}} onClick={()=>{setIsPasswordModalOpen(false);setPasswordForm({currentPassword:'',newPassword:'',confirmPassword:''});setUsernameForm({currentPassword:'',newUsername:''});setEmailForm({currentPassword:'',newEmail:''});}}>✕</button>
             </div>
-            {passwordError&&<div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',color:'#ef4444',fontSize:13}}>⚠ {passwordError}</div>}
-            <form onSubmit={handleUpdatePassword}>
-              <div style={{marginBottom:14}}><label>Current Password</label><input type="password" value={passwordForm.currentPassword} onChange={e=>setPasswordForm({...passwordForm,currentPassword:e.target.value})} required/></div>
-              <div style={{height:1,background:t.divider,marginBottom:14}}/>
-              <div style={{marginBottom:14}}><label>New Password</label><input type="password" value={passwordForm.newPassword} onChange={e=>setPasswordForm({...passwordForm,newPassword:e.target.value})} required/></div>
-              <div style={{marginBottom:20}}><label>Confirm New Password</label><input type="password" value={passwordForm.confirmPassword} onChange={e=>setPasswordForm({...passwordForm,confirmPassword:e.target.value})} required/></div>
-              <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
-                <button type="button" className="btn btn-ghost" onClick={()=>{setIsPasswordModalOpen(false);setPasswordForm({currentPassword:'',newPassword:'',confirmPassword:''});}}>Cancel</button>
-                <button type="submit" className="btn btn-primary">Update Password</button>
-              </div>
-            </form>
+
+            {/* Tab bar */}
+            <div style={{display:'flex',gap:6,marginBottom:20,borderBottom:`1px solid ${t.divider}`,paddingBottom:12}}>
+              {[
+                {key:'password', icon:'🔑', label:'Password'},
+                {key:'username', icon:'◈',  label:'Username'},
+                {key:'email',    icon:'✉',  label:'Email'},
+              ].map(tab=>(
+                <button
+                  key={tab.key}
+                  type="button"
+                  className={`tab-btn ${accountSettingsTab===tab.key?'active':'inactive'}`}
+                  style={{fontSize:12,padding:'7px 14px'}}
+                  onClick={()=>{setAccountSettingsTab(tab.key);setPasswordError('');setUsernameError('');setEmailError('');}}
+                >{tab.icon} {tab.label}</button>
+              ))}
+            </div>
+
+            {/* ── Password tab ── */}
+            {accountSettingsTab==='password'&&(()=>{
+              const pw = passwordForm.newPassword;
+              const checks = [
+                { label:'8+ characters',        pass: pw.length >= 8 },
+                { label:'Uppercase letter',      pass: /[A-Z]/.test(pw) },
+                { label:'Lowercase letter',      pass: /[a-z]/.test(pw) },
+                { label:'Number',                pass: /[0-9]/.test(pw) },
+                { label:'Special character',     pass: /[^A-Za-z0-9]/.test(pw) },
+              ];
+              const strength = checks.filter(c=>c.pass).length;
+              const strengthLabel = ['','Weak','Fair','Good','Strong','Very Strong'][strength];
+              const strengthColor = ['','#ef4444','#f59e0b','#eab308','#10b981','#6366f1'][strength];
+              return (
+                <>
+                  {passwordError&&<div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',color:'#ef4444',fontSize:13}}>⚠ {passwordError}</div>}
+                  <form onSubmit={handleUpdatePassword}>
+                    {/* Current password with peek */}
+                    <div style={{marginBottom:14}}>
+                      <label>Current Password</label>
+                      <div style={{position:'relative'}}>
+                        <input type={showCurrentPw?'text':'password'} value={passwordForm.currentPassword} onChange={e=>setPasswordForm({...passwordForm,currentPassword:e.target.value})} required style={{paddingRight:42}}/>
+                        <button type="button" onClick={()=>setShowCurrentPw(v=>!v)} style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',color:t.text3,fontSize:16,lineHeight:1,padding:0}}>{showCurrentPw?'🙈':'👁'}</button>
+                      </div>
+                    </div>
+                    <div style={{height:1,background:t.divider,marginBottom:14}}/>
+                    {/* New password with peek + strength */}
+                    <div style={{marginBottom:6}}>
+                      <label>New Password</label>
+                      <div style={{position:'relative'}}>
+                        <input type={showNewPw?'text':'password'} value={passwordForm.newPassword} onChange={e=>setPasswordForm({...passwordForm,newPassword:e.target.value})} required style={{paddingRight:42}}/>
+                        <button type="button" onClick={()=>setShowNewPw(v=>!v)} style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',color:t.text3,fontSize:16,lineHeight:1,padding:0}}>{showNewPw?'🙈':'👁'}</button>
+                      </div>
+                    </div>
+                    {/* Strength meter */}
+                    {pw.length>0&&(
+                      <div style={{marginBottom:14}}>
+                        <div style={{display:'flex',gap:4,marginBottom:6}}>
+                          {[1,2,3,4,5].map(i=>(
+                            <div key={i} style={{flex:1,height:4,borderRadius:2,background:i<=strength?strengthColor:(dark?'rgba(148,163,184,.2)':'#e2e8f0'),transition:'background .3s'}}/>
+                          ))}
+                        </div>
+                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+                          <div style={{display:'flex',flexWrap:'wrap',gap:'4px 12px'}}>
+                            {checks.map(c=>(
+                              <span key={c.label} style={{fontSize:11,color:c.pass?'#10b981':t.text3,display:'flex',alignItems:'center',gap:3}}>
+                                <span>{c.pass?'✓':'○'}</span>{c.label}
+                              </span>
+                            ))}
+                          </div>
+                          {strengthLabel&&<span style={{fontSize:11,fontWeight:700,color:strengthColor,flexShrink:0,marginLeft:8}}>{strengthLabel}</span>}
+                        </div>
+                      </div>
+                    )}
+                    {/* Confirm password with peek */}
+                    <div style={{marginBottom:20}}>
+                      <label>Confirm New Password</label>
+                      <div style={{position:'relative'}}>
+                        <input type={showConfirmPw?'text':'password'} value={passwordForm.confirmPassword} onChange={e=>setPasswordForm({...passwordForm,confirmPassword:e.target.value})} required style={{paddingRight:42}}/>
+                        <button type="button" onClick={()=>setShowConfirmPw(v=>!v)} style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',color:t.text3,fontSize:16,lineHeight:1,padding:0}}>{showConfirmPw?'🙈':'👁'}</button>
+                      </div>
+                      {passwordForm.confirmPassword.length>0&&(
+                        <div style={{marginTop:6,fontSize:11,color:passwordForm.newPassword===passwordForm.confirmPassword?'#10b981':'#ef4444',display:'flex',alignItems:'center',gap:4}}>
+                          {passwordForm.newPassword===passwordForm.confirmPassword?'✓ Passwords match':'✕ Passwords do not match'}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
+                      <button type="button" className="btn btn-ghost" onClick={()=>{setIsPasswordModalOpen(false);setPasswordForm({currentPassword:'',newPassword:'',confirmPassword:''});setShowCurrentPw(false);setShowNewPw(false);setShowConfirmPw(false);}}>Cancel</button>
+                      <button type="submit" className="btn btn-primary" disabled={strength<2||passwordForm.newPassword!==passwordForm.confirmPassword}>Update Password</button>
+                    </div>
+                  </form>
+                </>
+              );
+            })()}
+
+            {/* ── Username tab ── */}
+            {accountSettingsTab==='username'&&(
+              <>
+                <div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:dark?'rgba(99,102,241,.08)':'#ede9fe',border:'1px solid rgba(99,102,241,.2)',fontSize:13,color:'#6366f1'}}>
+                  Current username: <strong>{currentUser.username}</strong>
+                </div>
+                {usernameError&&<div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',color:'#ef4444',fontSize:13}}>⚠ {usernameError}</div>}
+                <form onSubmit={handleUpdateUsername}>
+                  <div style={{marginBottom:14}}><label>New Username</label><input type="text" value={usernameForm.newUsername} onChange={e=>setUsernameForm({...usernameForm,newUsername:e.target.value})} required placeholder="new.username" autoComplete="off"/></div>
+                  <div style={{height:1,background:t.divider,marginBottom:14}}/>
+                  <div style={{marginBottom:20}}><label>Confirm with Password</label><input type="password" value={usernameForm.currentPassword} onChange={e=>setUsernameForm({...usernameForm,currentPassword:e.target.value})} required placeholder="Enter your password to confirm"/></div>
+                  <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
+                    <button type="button" className="btn btn-ghost" onClick={()=>{setIsPasswordModalOpen(false);setUsernameForm({currentPassword:'',newUsername:''});}}>Cancel</button>
+                    <button type="submit" className="btn btn-primary">Update Username</button>
+                  </div>
+                </form>
+              </>
+            )}
+
+            {/* ── Email tab ── */}
+            {accountSettingsTab==='email'&&(
+              <>
+                <div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:dark?'rgba(99,102,241,.08)':'#ede9fe',border:'1px solid rgba(99,102,241,.2)',fontSize:13,color:'#6366f1'}}>
+                  Current email: <strong>{currentUser.email||<span style={{fontStyle:'italic',opacity:.6}}>not set</span>}</strong>
+                </div>
+                {emailError&&<div style={{padding:'10px 14px',borderRadius:8,marginBottom:16,background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',color:'#ef4444',fontSize:13}}>⚠ {emailError}</div>}
+                <form onSubmit={handleUpdateEmail}>
+                  <div style={{marginBottom:14}}><label>New Email Address</label><input type="email" value={emailForm.newEmail} onChange={e=>setEmailForm({...emailForm,newEmail:e.target.value})} required placeholder="you@example.com"/></div>
+                  <div style={{height:1,background:t.divider,marginBottom:14}}/>
+                  <div style={{marginBottom:20}}><label>Confirm with Password</label><input type="password" value={emailForm.currentPassword} onChange={e=>setEmailForm({...emailForm,currentPassword:e.target.value})} required placeholder="Enter your password to confirm"/></div>
+                  <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
+                    <button type="button" className="btn btn-ghost" onClick={()=>{setIsPasswordModalOpen(false);setEmailForm({currentPassword:'',newEmail:''});}}>Cancel</button>
+                    <button type="submit" className="btn btn-primary">Update Email</button>
+                  </div>
+                </form>
+                {/* Notification preference */}
+                <div style={{marginTop:20,paddingTop:16,borderTop:`1px solid ${t.divider}`}}>
+                  <label style={{marginBottom:8}}>Notification Preferences</label>
+                  <div
+                    onClick={()=>handleToggleEmailNotifications(!(currentUser.email_notifications!==false))}
+                    style={{display:'flex',alignItems:'center',gap:12,padding:'12px 14px',borderRadius:10,cursor:'pointer',border:`1px solid ${currentUser.email_notifications!==false?'rgba(99,102,241,.35)':t.border}`,background:currentUser.email_notifications!==false?(dark?'rgba(99,102,241,.1)':'#ede9fe'):'transparent',transition:'all .2s'}}
+                  >
+                    {/* Custom checkbox */}
+                    <div style={{width:20,height:20,borderRadius:5,border:`2px solid ${currentUser.email_notifications!==false?'#6366f1':t.text3}`,background:currentUser.email_notifications!==false?'#6366f1':'transparent',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,transition:'all .2s'}}>
+                      {currentUser.email_notifications!==false&&<span style={{color:'#fff',fontSize:12,lineHeight:1,fontWeight:700}}>✓</span>}
+                    </div>
+                    <div>
+                      <div style={{fontSize:13,fontWeight:600,color:t.text1}}>Receive approval email confirmations</div>
+                      <div style={{fontSize:11,color:t.text3,marginTop:2}}>Get an email when your activity request is approved.</div>
+                    </div>
+                  </div>
+                  {!currentUser.email&&(
+                    <div style={{marginTop:8,fontSize:11,color:'#f59e0b',display:'flex',alignItems:'center',gap:4}}>
+                      ⚠ Set an email address above to receive notifications.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
           </div>
         </div>
       )}
