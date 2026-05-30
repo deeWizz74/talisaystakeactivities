@@ -154,11 +154,20 @@ const GlobalStyles = ({ t, dark }) => (
     @keyframes pulse-dot { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }
     .fade-in  { animation: fadeIn  .28s ease both; }
     .slide-up { animation: slideUp .32s cubic-bezier(.34,1.56,.64,1) both; }
-    .calendar-cell { background: ${t.calCellBg}; border: 1px solid ${t.border}; border-radius: 10px; min-height: 110px; padding: 8px; cursor: pointer; transition: all .18s; }
+    .calendar-cell { background: ${t.calCellBg}; border: 1px solid ${t.border}; border-radius: 10px; height: 110px; padding: 8px; cursor: pointer; transition: all .18s; overflow: hidden; display: flex; flex-direction: column; }
     .calendar-cell:hover { border-color: rgba(99,102,241,.35); background: ${t.calCellHover}; }
     .calendar-cell.today { border-color: rgba(99,102,241,.5); background: ${dark ? 'rgba(99,102,241,.08)' : 'rgba(99,102,241,.05)'}; }
-    .activity-pill { border-radius: 6px; padding: 4px 7px; margin-bottom: 3px; font-size: 11px; cursor: pointer; transition: all .15s; overflow: hidden; }
-    .activity-pill:hover { transform: translateX(2px); filter: brightness(${dark ? '1.12' : '.95'}); }
+    .calendar-cell .cell-pills { flex: 1; overflow: hidden; min-height: 0; }
+    .activity-pill { border-radius: 5px; padding: 3px 6px; margin-bottom: 3px; font-size: 10px; cursor: pointer; transition: all .15s; overflow: hidden; }
+    .activity-pill:hover { filter: brightness(${dark ? '1.15' : '.93'}); }
+    @media (max-width: 640px) {
+      .calendar-cell { height: 90px; padding: 5px 4px; border-radius: 7px; }
+      .activity-pill { padding: 3px 4px; margin-bottom: 2px; border-radius: 4px; border-left-width: 2px !important; }
+    }
+    @media (max-width: 400px) {
+      .calendar-cell { height: 76px; padding: 4px 3px; }
+      .activity-pill { padding: 2px 3px; margin-bottom: 2px; }
+    }
     .data-table { width: 100%; border-collapse: collapse; }
     .data-table th { padding: 12px 16px; text-align: left; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: ${t.text3}; border-bottom: 1px solid ${t.border}; background: ${t.tableTh}; position: sticky; top: 0; z-index: 1; }
     .data-table td { padding: 13px 16px; font-size: 13px; border-bottom: 1px solid ${t.border}; color: ${t.text2}; }
@@ -304,20 +313,30 @@ export default function App() {
   const [currentDate,          setCurrentDate]          = useState(new Date(2026, 4, 1));
   const [declineTarget,        setDeclineTarget]        = useState(null);
   const [activityEmailConfirm, setActivityEmailConfirm] = useState(true);
+  const [userMenuOpen,         setUserMenuOpen]         = useState(false);
 
   // ── Auth state ──────────────────────────────────────────────────────────
-  const [authScreen,     setAuthScreen]     = useState('login');
-  const [usernameInput,  setUsernameInput]  = useState('');
-  const [passwordInput,  setPasswordInput]  = useState('');
-  const [loginError,     setLoginError]     = useState('');
-  const [recoveryUser,   setRecoveryUser]   = useState('');
-  const [recoveryResult, setRecoveryResult] = useState(null);
+  const [authScreen,       setAuthScreen]       = useState('login');
+  const [usernameInput,    setUsernameInput]    = useState('');
+  const [passwordInput,    setPasswordInput]    = useState('');
+  const [loginError,       setLoginError]       = useState('');
+  const [recoveryUser,     setRecoveryUser]     = useState('');
+  const [recoveryResult,   setRecoveryResult]   = useState(null);
+  const [otpInput,         setOtpInput]         = useState('');
+  const [otpVerified,      setOtpVerified]      = useState(false);
+  const [otpUserId,        setOtpUserId]        = useState(null);
+  const [otpNewPassword,   setOtpNewPassword]   = useState('');
+  const [otpConfirmPw,     setOtpConfirmPw]     = useState('');
+  const [otpShowNew,       setOtpShowNew]       = useState(false);
+  const [otpShowConfirm,   setOtpShowConfirm]   = useState(false);
 
   // ── Activity modal state ────────────────────────────────────────────────
   const [isActivityModalOpen, setIsActivityModalOpen] = useState(false);
   const [editingActivity,     setEditingActivity]     = useState(null);
   const [isReadOnly,          setIsReadOnly]          = useState(false);
   const [selectedDateStr,     setSelectedDateStr]     = useState(null);
+  const [isDayModalOpen,      setIsDayModalOpen]      = useState(false);
+  const [dayModalDate,        setDayModalDate]        = useState(null);
   const [locationType,        setLocationType]        = useState('');
   const [conflictError,       setConflictError]       = useState('');
   const [activityForm,        setActivityForm]        = useState({
@@ -500,7 +519,7 @@ export default function App() {
           email:           profileData.email,
           user_email:      profileData.email,
           recipient_email: profileData.email,
-          to_name:         profileData.name || 'Applicant',
+          to_name:         'Stake Activity Committee',
           user_name:       profileData.name || 'Applicant',
           temp_password:   '',
           activity_title:  activity.title,
@@ -522,7 +541,110 @@ export default function App() {
     }
   };
 
-  // ── Auth handlers ────────────────────────────────────────────────────────
+  // ── Email: new activity submitted — notify all committee members ──────────
+  const sendNewActivityEmail = async (activity) => {
+    try {
+      const { data: committee } = await supabase
+        .from('profiles')
+        .select('email, name')
+        .or('is_admin.eq.true,role.eq.Agent Bishop,is_activity_committee.eq.true');
+
+      const recipients = (committee || []).filter((r) => r.email?.trim());
+      if (!recipients.length) return;
+
+      // Send individual email to each committee member so everyone is guaranteed to receive it
+      await Promise.all(
+        recipients.map((r) =>
+          emailjs.send(
+            'service_kmrplqp',
+            'template_0bkufsx',
+            {
+              to_email:        r.email.trim(),
+              email:           r.email.trim(),
+              user_email:      r.email.trim(),
+              recipient_email: r.email.trim(),
+              to_name:         r.name || 'Committee Member',
+              user_name:       'Activity Committee',
+              temp_password:   '',
+              activity_title:  activity.title,
+              organization:    activity.organization || 'General',
+              schedule_date:   activity.date,
+              schedule_time:   `${fmt12(activity.start_time)} - ${fmt12(activity.end_time)}`,
+              venue_location:  activity.location || '',
+              approval_signer: `New request by ${activity.submitter_name || 'a member'}`,
+              reply_to:        r.email.trim(),
+            },
+            'nu1KpRQC1JdQv3ZDN'
+          )
+        )
+      );
+
+      console.log('New activity emails sent to:', recipients.map((r) => r.email).join(', '));
+    } catch (err) {
+      console.error('New activity committee email failed:', err);
+    }
+  };
+
+  // ── Email: 1-week reminder for still-pending activities ────────────────────
+  const checkAndSendUnapprovedAlerts = useCallback(async () => {
+    try {
+      const oneWeekLater = new Date();
+      oneWeekLater.setDate(oneWeekLater.getDate() + 7);
+      const targetDate = oneWeekLater.toISOString().split('T')[0];
+
+      const { data: pending } = await supabase
+        .from('activities')
+        .select('*')
+        .eq('status', 'pending')
+        .eq('date', targetDate);
+
+      if (!pending?.length) return;
+
+      const { data: committee } = await supabase
+        .from('profiles')
+        .select('email, name')
+        .or('is_admin.eq.true,role.eq.Agent Bishop,is_activity_committee.eq.true');
+
+      const recipients = (committee || []).filter((r) => r.email?.trim());
+      if (!recipients.length) return;
+
+      const toEmail = recipients[0].email.trim();
+
+      for (const act of pending) {
+        await emailjs.send(
+          'service_kmrplqp',
+          'template_i5crz87',
+          {
+            to_email:        toEmail,
+            email:           toEmail,
+            user_email:      toEmail,
+            recipient_email: toEmail,
+            to_name:         'Stake Activity Committee',
+            user_name:       'Activity Committee',
+            temp_password:   '',
+            activity_title:  `⚠ PENDING (1 week away): ${act.title}`,
+            organization:    act.organization || 'General',
+            schedule_date:   act.date,
+            schedule_time:   `${fmt12(act.start_time)} - ${fmt12(act.end_time)}`,
+            venue_location:  act.location || '',
+            approval_signer: 'Automated Reminder — needs approval',
+            reply_to:        toEmail,
+          },
+          'nu1KpRQC1JdQv3ZDN'
+        );
+      }
+    } catch (err) {
+      console.error('Unapproved alert email failed:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    checkAndSendUnapprovedAlerts();
+    // Re-check every hour
+    const iv = setInterval(checkAndSendUnapprovedAlerts, 60 * 60 * 1000);
+    return () => clearInterval(iv);
+  }, [currentUser, checkAndSendUnapprovedAlerts]);
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoginError('');
@@ -544,11 +666,13 @@ export default function App() {
       if (error || !user) { setLoginError('Account not found.'); return; }
       if (!user.email?.trim()) { setLoginError('Recovery failed: No email address on file. Contact an administrator.'); return; }
 
-      const tempPassword = Math.random().toString(36).slice(-6) + 'A' + Math.floor(Math.random() * 9 + 1) + '!';
-      const hashedTemp = await bcrypt.hash(tempPassword, 10);
+      // Generate a 6-digit OTP
+      const otp = String(Math.floor(100000 + Math.random() * 900000));
+      const hashedOtp = await bcrypt.hash(otp, 10);
 
-      const { error: updateError } = await supabase.from('profiles').update({ password: hashedTemp }).eq('id', user.id);
-      if (updateError) throw updateError;
+      // Store hashed OTP in DB temporarily (reuse password field pattern via a dedicated otp_hash column if available, else store in session)
+      // We store it in state — the OTP is only valid this session
+      setOtpUserId({ id: user.id, email: user.email.trim(), hashedOtp });
 
       await emailjs.send(
         'service_5wmibq6',
@@ -558,10 +682,10 @@ export default function App() {
           email:           user.email.trim(),
           user_email:      user.email.trim(),
           recipient_email: user.email.trim(),
-          to_name:         user.name || user.username,
+          to_name:         'Stake Activity Committee',
           user_name:       user.name || user.username,
-          temp_password:   tempPassword,
-          activity_title:  'Password Reset Request',
+          temp_password:   otp,
+          activity_title:  'Your OTP Code',
           organization:    '',
           schedule_date:   '',
           schedule_time:   '',
@@ -574,10 +698,42 @@ export default function App() {
       );
 
       setRecoveryResult({ success: true, email: user.email });
-      showToast('Recovery email sent.');
+      showToast('OTP sent to your registered email.');
     } catch (err) {
       const msg = err?.message || err?.text || (typeof err === 'string' ? err : 'Something went wrong.');
       setLoginError(`Recovery failed: ${msg}`);
+    }
+  };
+
+  const handleVerifyOtp = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    if (!otpUserId) { setLoginError('Session expired. Please request a new OTP.'); return; }
+    const match = await bcrypt.compare(otpInput.trim(), otpUserId.hashedOtp);
+    if (!match) { setLoginError('Incorrect OTP. Please try again.'); return; }
+    setOtpVerified(true);
+  };
+
+  const handleOtpChangePassword = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    if (otpNewPassword !== otpConfirmPw) { setLoginError('Passwords do not match.'); return; }
+    if (otpNewPassword.length < 4) { setLoginError('Password must be at least 4 characters.'); return; }
+    try {
+      const hashedNew = await bcrypt.hash(otpNewPassword, 10);
+      const { error } = await supabase.from('profiles').update({ password: hashedNew }).eq('id', otpUserId.id);
+      if (error) throw error;
+      showToast('Password changed successfully. Please sign in.');
+      setAuthScreen('login');
+      setRecoveryResult(null);
+      setOtpInput('');
+      setOtpVerified(false);
+      setOtpUserId(null);
+      setOtpNewPassword('');
+      setOtpConfirmPw('');
+      setRecoveryUser('');
+    } catch (err) {
+      setLoginError(`Failed: ${err.message}`);
     }
   };
 
@@ -620,6 +776,11 @@ export default function App() {
     setIsActivityModalOpen(true);
   };
 
+  const openDayModal = (dateStr) => {
+    setDayModalDate(dateStr);
+    setIsDayModalOpen(true);
+  };
+
   const handleSaveActivity = async (e) => {
     e.preventDefault();
     if (!selectedDateStr) { showToast('Please choose a day on the calendar first.', 'error'); return; }
@@ -647,6 +808,8 @@ export default function App() {
         await writeAuditLog(currentUser.id, currentUser.name, 'INSERT', `Created activity: "${activityForm.title}"`);
         showToast('Activity submitted for approval.');
         setActivityEmailConfirm(true);
+        // Notify all committee members of the new request
+        await sendNewActivityEmail({ ...payload, submitter_name: currentUser.name });
       }
       setIsActivityModalOpen(false);
       fetchActivities();
@@ -890,25 +1053,102 @@ export default function App() {
                 </>
               ) : (
                 <>
-                  <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6, color: t.text1 }}>Password Recovery</h2>
-                  <p style={{ fontSize: 13, color: t.text3, marginBottom: 24 }}>Enter your username and a recovery email will be sent to your registered address.</p>
+                  <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6, color: t.text1 }}>
+                    {otpVerified ? '🔑 Set New Password' : recoveryResult ? '🔐 Enter OTP' : 'Forgot Password'}
+                  </h2>
+                  <p style={{ fontSize: 13, color: t.text3, marginBottom: 24 }}>
+                    {otpVerified
+                      ? 'Create a new secure password for your account.'
+                      : recoveryResult
+                      ? `A 6-digit code was sent to ${recoveryResult.email}. Enter it below.`
+                      : 'Enter your username to receive a one-time passcode.'}
+                  </p>
                   {loginError && <div style={{ padding: '10px 14px', borderRadius: 8, marginBottom: 16, background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.3)', color: '#ef4444', fontSize: 13 }}>{loginError}</div>}
-                  {!recoveryResult ? (
+
+                  {/* Step 1: Enter username */}
+                  {!recoveryResult && !otpVerified && (
                     <form onSubmit={handlePasswordRecovery}>
                       <div style={{ marginBottom: 20 }}><label>Username</label><input type="text" value={recoveryUser} onChange={(e) => setRecoveryUser(e.target.value)} required placeholder="Enter your username" autoFocus /></div>
                       <div style={{ padding: '10px 14px', borderRadius: 8, marginBottom: 20, background: dark ? 'rgba(99,102,241,.08)' : '#ede9fe', border: '1px solid rgba(99,102,241,.2)', fontSize: 12, color: '#6366f1' }}>
-                        ✉ A reset link will be sent to the email address on your account.
+                        ✉ A 6-digit OTP will be sent to your registered email address.
                       </div>
-                      <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', padding: '12px 18px' }}>Send Recovery Email</button>
+                      <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', padding: '12px 18px' }}>Send OTP →</button>
                     </form>
-                  ) : (
-                    <div style={{ padding: 16, borderRadius: 10, background: 'rgba(16,185,129,.1)', border: '1px solid rgba(16,185,129,.25)' }}>
-                      <p style={{ fontSize: 13, color: t.text2 }}>A recovery email has been sent to:</p>
-                      <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: '#10b981', marginTop: 10, textAlign: 'center' }}>{recoveryResult.email}</div>
-                    </div>
                   )}
+
+                  {/* Step 2: Enter OTP */}
+                  {recoveryResult && !otpVerified && (
+                    <form onSubmit={handleVerifyOtp}>
+                      <div style={{ marginBottom: 20 }}>
+                        <label>6-Digit OTP</label>
+                        <input
+                          type="text"
+                          value={otpInput}
+                          onChange={(e) => setOtpInput(e.target.value.replace(/\D/g,'').slice(0,6))}
+                          required
+                          placeholder="______"
+                          maxLength={6}
+                          autoFocus
+                          style={{ letterSpacing: '0.3em', textAlign: 'center', fontSize: 22, fontWeight: 700, fontFamily: 'JetBrains Mono, monospace' }}
+                        />
+                      </div>
+                      <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', padding: '12px 18px' }} disabled={otpInput.length !== 6}>Verify OTP →</button>
+                      <div style={{ textAlign: 'center', marginTop: 14 }}>
+                        <span onClick={() => { setRecoveryResult(null); setOtpInput(''); setLoginError(''); }} style={{ fontSize: 13, color: '#6366f1', cursor: 'pointer', textDecoration: 'underline' }}>Resend OTP</span>
+                      </div>
+                    </form>
+                  )}
+
+                  {/* Step 3: Set new password */}
+                  {otpVerified && (() => {
+                    const pw = otpNewPassword;
+                    const checks = [
+                      { label: '8+ chars',    pass: pw.length >= 8 },
+                      { label: 'Uppercase',   pass: /[A-Z]/.test(pw) },
+                      { label: 'Lowercase',   pass: /[a-z]/.test(pw) },
+                      { label: 'Number',      pass: /[0-9]/.test(pw) },
+                      { label: 'Special',     pass: /[^A-Za-z0-9]/.test(pw) },
+                    ];
+                    const strength = checks.filter((c) => c.pass).length;
+                    const strengthColor = ['','#ef4444','#f59e0b','#eab308','#10b981','#6366f1'][strength];
+                    return (
+                      <form onSubmit={handleOtpChangePassword}>
+                        <div style={{ marginBottom: 10 }}>
+                          <label>New Password</label>
+                          <div style={{ position: 'relative' }}>
+                            <input type={otpShowNew ? 'text' : 'password'} value={otpNewPassword} onChange={(e) => setOtpNewPassword(e.target.value)} required style={{ paddingRight: 42 }} autoFocus />
+                            <button type="button" onClick={() => setOtpShowNew((v) => !v)} style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: t.text3, fontSize: 16, padding: 0 }}>{otpShowNew ? '🙈' : '👁'}</button>
+                          </div>
+                        </div>
+                        {pw.length > 0 && (
+                          <div style={{ marginBottom: 14 }}>
+                            <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                              {[1,2,3,4,5].map((i) => <div key={i} style={{ flex: 1, height: 4, borderRadius: 2, background: i <= strength ? strengthColor : (dark ? 'rgba(148,163,184,.2)' : '#e2e8f0'), transition: 'background .3s' }} />)}
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px' }}>
+                              {checks.map((c) => <span key={c.label} style={{ fontSize: 11, color: c.pass ? '#10b981' : t.text3 }}>{c.pass ? '✓' : '○'} {c.label}</span>)}
+                            </div>
+                          </div>
+                        )}
+                        <div style={{ marginBottom: 20 }}>
+                          <label>Confirm Password</label>
+                          <div style={{ position: 'relative' }}>
+                            <input type={otpShowConfirm ? 'text' : 'password'} value={otpConfirmPw} onChange={(e) => setOtpConfirmPw(e.target.value)} required style={{ paddingRight: 42 }} />
+                            <button type="button" onClick={() => setOtpShowConfirm((v) => !v)} style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: t.text3, fontSize: 16, padding: 0 }}>{otpShowConfirm ? '🙈' : '👁'}</button>
+                          </div>
+                          {otpConfirmPw.length > 0 && (
+                            <div style={{ marginTop: 6, fontSize: 11, color: otpNewPassword === otpConfirmPw ? '#10b981' : '#ef4444' }}>
+                              {otpNewPassword === otpConfirmPw ? '✓ Passwords match' : '✕ Passwords do not match'}
+                            </div>
+                          )}
+                        </div>
+                        <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', padding: '12px 18px' }} disabled={strength < 2 || otpNewPassword !== otpConfirmPw}>Set New Password ✓</button>
+                      </form>
+                    );
+                  })()}
+
                   <div style={{ textAlign: 'center', marginTop: 20 }}>
-                    <span onClick={() => { setAuthScreen('login'); setRecoveryResult(null); setLoginError(''); }} style={{ fontSize: 13, color: '#6366f1', cursor: 'pointer', textDecoration: 'underline' }}>← Back to sign in</span>
+                    <span onClick={() => { setAuthScreen('login'); setRecoveryResult(null); setOtpInput(''); setOtpVerified(false); setOtpUserId(null); setLoginError(''); }} style={{ fontSize: 13, color: '#6366f1', cursor: 'pointer', textDecoration: 'underline' }}>← Back to sign in</span>
                   </div>
                 </>
               )}
@@ -973,27 +1213,91 @@ export default function App() {
               </div>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{ fontSize: 11, color: t.text3 }}>{dark ? '🌙' : '☀️'}</span>
-            <button className="theme-toggle" onClick={toggleTheme} />
-            <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={openAccountModal}>⚙ Account</button>
-            <button className="btn btn-danger" style={{ fontSize: 12 }} onClick={handleLogout}>Sign Out</button>
+          {/* ── User dropdown ── */}
+          <div style={{ position: 'relative' }}>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px' }}
+              onClick={() => setUserMenuOpen((v) => !v)}
+            >
+              <span style={{ width: 28, height: 28, borderRadius: '50%', background: 'linear-gradient(135deg,#6366f1,#4f46e5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, color: '#fff', fontWeight: 700, flexShrink: 0 }}>
+                {(currentUser.name || currentUser.username || '?')[0].toUpperCase()}
+              </span>
+              <span style={{ color: t.text2, maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentUser.name || currentUser.username}</span>
+              <span style={{ color: t.text3, fontSize: 10 }}>{userMenuOpen ? '▲' : '▼'}</span>
+            </button>
+
+            {userMenuOpen && (
+              <>
+                {/* Backdrop */}
+                <div style={{ position: 'fixed', inset: 0, zIndex: 199 }} onClick={() => setUserMenuOpen(false)} />
+                <div className="slide-up" style={{
+                  position: 'absolute', top: 'calc(100% + 8px)', right: 0, zIndex: 200,
+                  background: t.modalBg, border: `1px solid ${t.borderAccent}`, borderRadius: 12,
+                  padding: '8px 0', minWidth: 220,
+                  boxShadow: `0 16px 48px rgba(0,0,0,${dark ? '.6' : '.15'}), 0 0 0 1px rgba(99,102,241,.08)`,
+                }}>
+                  {/* Dark mode toggle */}
+                  <div style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: `1px solid ${t.border}`, marginBottom: 4 }}>
+                    <span style={{ fontSize: 13, color: t.text2, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {dark ? '🌙' : '☀️'} {dark ? 'Dark Mode' : 'Light Mode'}
+                    </span>
+                    <button className="theme-toggle" onClick={() => { toggleTheme(); }} style={{ flexShrink: 0 }} />
+                  </div>
+                  {/* Account settings items */}
+                  {[
+                    { icon: '🔑', label: 'Change Password', tab: 'password' },
+                    { icon: '◈',  label: 'Change Username', tab: 'username' },
+                    { icon: '✉',  label: 'Change Email',    tab: 'email'    },
+                  ].map(({ icon, label, tab }) => (
+                    <button key={tab} style={{
+                      width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+                      padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 10,
+                      fontSize: 13, color: t.text2, textAlign: 'left', transition: 'background .15s',
+                    }}
+                      onMouseEnter={(e) => e.currentTarget.style.background = dark ? 'rgba(99,102,241,.08)' : '#f1f5f9'}
+                      onMouseLeave={(e) => e.currentTarget.style.background = 'none'}
+                      onClick={() => { setAccountTab(tab); setPasswordError(''); setUsernameError(''); setEmailError(''); setIsAccountModalOpen(true); setUserMenuOpen(false); }}
+                    >
+                      <span>{icon}</span> {label}
+                    </button>
+                  ))}
+                  <div style={{ height: 1, background: t.border, margin: '4px 0' }} />
+                  {/* Sign Out */}
+                  <button style={{
+                    width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 10,
+                    fontSize: 13, color: '#ef4444', textAlign: 'left', transition: 'background .15s',
+                  }}
+                    onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239,68,68,.06)'}
+                    onMouseLeave={(e) => e.currentTarget.style.background = 'none'}
+                    onClick={() => { setUserMenuOpen(false); handleLogout(); }}
+                  >
+                    <span>⏻</span> Sign Out
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </header>
 
-        {/* ── Tab bar ── */}
+        {/* ── Tab bar (burger nav) ── */}
         <div style={{ background: t.tabBg, borderBottom: `1px solid ${t.border}` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '10px 24px', overflowX: 'auto' }}>
+            {/* Burger button */}
+            <button
+              onClick={() => setNavCollapsed((v) => !v)}
+              title={navCollapsed ? 'Show navigation' : 'Collapse navigation'}
+              style={{ flexShrink: 0, background: 'none', border: `1px solid ${navCollapsed ? 'rgba(99,102,241,.35)' : t.border}`, borderRadius: 7, cursor: 'pointer', color: navCollapsed ? '#6366f1' : t.text3, padding: '6px 10px', fontSize: 15, lineHeight: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3, width: 36, height: 34 }}
+              aria-label="Toggle navigation"
+            >
+              <span style={{ display: 'block', width: 14, height: 2, borderRadius: 1, background: 'currentColor', transition: 'all .2s', transform: navCollapsed ? 'rotate(45deg) translate(3px, 3px)' : 'none' }} />
+              <span style={{ display: 'block', width: 14, height: 2, borderRadius: 1, background: 'currentColor', transition: 'all .2s', opacity: navCollapsed ? 0 : 1 }} />
+              <span style={{ display: 'block', width: 14, height: 2, borderRadius: 1, background: 'currentColor', transition: 'all .2s', transform: navCollapsed ? 'rotate(-45deg) translate(3px, -3px)' : 'none' }} />
+            </button>
             {!navCollapsed && tabs.map((tb) => (
               <button key={tb.key} className={`tab-btn ${adminTab === tb.key ? 'active' : 'inactive'}`} onClick={() => setAdminTab(tb.key)}>{tb.label}</button>
             ))}
-            <button
-              onClick={() => setNavCollapsed((v) => !v)}
-              title={navCollapsed ? 'Show navigation' : 'Hide navigation'}
-              style={{ marginLeft: 'auto', flexShrink: 0, background: 'none', border: `1px solid ${t.border}`, borderRadius: 7, cursor: 'pointer', color: t.text3, padding: '6px 10px', fontSize: 13, lineHeight: 1, display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap' }}
-            >
-              {navCollapsed ? '▾ Show Nav' : '▴ Hide'}
-            </button>
           </div>
         </div>
 
@@ -1045,23 +1349,22 @@ export default function App() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 6 }}>
                 {calendarDays.map((item, idx) => {
-                  if (!item) return <div key={`e-${idx}`} style={{ minHeight: 110 }} />;
+                  if (!item) return <div key={`e-${idx}`} style={{ height: 110 }} />;
                   const isToday = item.dateString === todayStr;
                   const dayActs = (activities || []).filter((a) => {
                     const match = a?.date === item.dateString;
                     return canReview(currentUser) ? match : match && a.is_approved === true;
                   });
                   return (
-                    <div key={item.dateString} className={`calendar-cell${isToday ? ' today' : ''}`} onClick={() => openActivityModal(item.dateString, null)}>
-                      <span style={{ display: 'inline-flex', width: 24, height: 24, alignItems: 'center', justifyContent: 'center', borderRadius: '50%', fontSize: 12, fontWeight: 600, marginBottom: 4, background: isToday ? 'linear-gradient(135deg,#6366f1,#4f46e5)' : 'transparent', color: isToday ? '#fff' : t.text2 }}>{item.day}</span>
-                      <div>
+                    <div key={item.dateString} className={`calendar-cell${isToday ? ' today' : ''}`} onClick={() => openDayModal(item.dateString)}>
+                      <span style={{ display: 'inline-flex', width: 22, height: 22, alignItems: 'center', justifyContent: 'center', borderRadius: '50%', fontSize: 11, fontWeight: 600, marginBottom: 3, flexShrink: 0, background: isToday ? 'linear-gradient(135deg,#6366f1,#4f46e5)' : 'transparent', color: isToday ? '#fff' : t.text2 }}>{item.day}</span>
+                      <div className="cell-pills">
                         {dayActs.map((act) => {
                           const p = getOrgColors(act.organization, dark);
                           return (
-                            <div key={act.id} className="activity-pill" onClick={(e) => { e.stopPropagation(); openActivityModal(item.dateString, act); }} style={{ background: p.bg, color: p.text, borderLeft: `3px solid ${p.border}` }}>
-                              <div style={{ fontSize: 9, fontWeight: 700, opacity: .8, marginBottom: 1 }}>{fmt12(act.start_time)}</div>
-                              <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11 }}>{act.title}</div>
-                              {act.location && <div style={{ fontSize: 9, opacity: .7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>📍 {act.location}</div>}
+                            <div key={act.id} className="activity-pill" onClick={(e) => { e.stopPropagation(); openDayModal(item.dateString); }} style={{ background: p.bg, borderLeft: `3px solid ${p.border}`, display: 'flex', alignItems: 'center', gap: 4 }}>
+                              <span style={{ width: 6, height: 6, borderRadius: '50%', background: p.border, flexShrink: 0 }} />
+                              <span style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 10, color: p.text }}>{act.title}</span>
                             </div>
                           );
                         })}
@@ -1276,6 +1579,81 @@ export default function App() {
 
       {/* ═══════════════════════ MODALS ═══════════════════════════ */}
 
+      {/* ── Day Modal ── */}
+      {isDayModalOpen && (() => {
+        const d = dayModalDate ? new Date(dayModalDate + 'T00:00:00') : null;
+        const dayActs = d ? (activities || []).filter((a) => {
+          const match = a?.date === dayModalDate;
+          return canReview(currentUser) ? match : match && a.is_approved === true;
+        }).sort((a, b) => timeToMinutes(a.start_time) - timeToMinutes(b.start_time)) : [];
+        const dateLabel = d ? d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : '';
+        return (
+          <div className="modal-overlay" onClick={() => setIsDayModalOpen(false)}>
+            <div className="modal-card slide-up" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+              {/* Header */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                <div>
+                  <h3 style={{ fontSize: 18, fontWeight: 700, color: t.text1 }}>📅 {dateLabel}</h3>
+                  <p style={{ fontSize: 12, color: t.text3, marginTop: 3 }}>{dayActs.length} activit{dayActs.length === 1 ? 'y' : 'ies'} scheduled</p>
+                </div>
+                <button className="btn btn-ghost" style={{ padding: '6px 10px', fontSize: 16 }} onClick={() => setIsDayModalOpen(false)}>✕</button>
+              </div>
+
+              {/* Activity list */}
+              {dayActs.length === 0 ? (
+                <div style={{ padding: '32px 20px', textAlign: 'center', borderRadius: 10, border: `1px dashed ${t.emptyBorder}`, color: t.emptyColor, fontSize: 13, marginBottom: 16 }}>
+                  📭 No activities on this day yet.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16, maxHeight: 380, overflowY: 'auto' }}>
+                  {dayActs.map((act) => {
+                    const p = getOrgColors(act.organization, dark);
+                    const chip = statusChip(act);
+                    return (
+                      <div key={act.id}
+                        onClick={() => { setIsDayModalOpen(false); openActivityModal(dayModalDate, act); }}
+                        style={{ display: 'flex', gap: 12, padding: '12px 14px', borderRadius: 10, border: `1px solid ${t.border}`, background: t.surfaceCard, cursor: 'pointer', transition: 'all .15s', borderLeft: `4px solid ${p.border}` }}
+                        onMouseEnter={(e) => e.currentTarget.style.borderColor = p.border}
+                        onMouseLeave={(e) => e.currentTarget.style.borderColor = t.border}
+                      >
+                        {/* Time column */}
+                        <div style={{ minWidth: 58, textAlign: 'center' }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: '#6366f1' }}>{fmt12(act.start_time)}</div>
+                          <div style={{ fontSize: 10, color: t.text3, marginTop: 1 }}>–</div>
+                          <div style={{ fontSize: 10, color: t.text3 }}>{fmt12(act.end_time)}</div>
+                        </div>
+                        {/* Divider */}
+                        <div style={{ width: 1, background: t.border, flexShrink: 0 }} />
+                        {/* Info */}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, background: p.bg, color: p.text, border: `1px solid ${p.border}`, padding: '1px 7px', borderRadius: 20 }}>{act.organization || 'General'}</span>
+                            <span className="badge" style={{ background: chip.bg, color: chip.color, border: `1px solid ${chip.border}`, fontSize: 9 }}>{chip.label}</span>
+                          </div>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: t.text1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{act.title}</div>
+                          {act.location && <div style={{ fontSize: 11, color: t.text3, marginTop: 2 }}>📍 {act.location}</div>}
+                        </div>
+                        <div style={{ fontSize: 14, color: t.text3, alignSelf: 'center' }}>›</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Footer */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 12, borderTop: `1px solid ${t.border}` }}>
+                <button className="btn btn-ghost" onClick={() => setIsDayModalOpen(false)}>Close</button>
+                {!isBishop(currentUser) && (
+                  <button className="btn btn-success" onClick={() => { setIsDayModalOpen(false); openActivityModal(dayModalDate, null); }}>
+                    + Add New Activity
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Activity Modal ── */}
       {isActivityModalOpen && (
         <div className="modal-overlay" onClick={() => setIsActivityModalOpen(false)}>
@@ -1287,7 +1665,7 @@ export default function App() {
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {isReadOnly && (
                   <span className="badge" style={{ background: 'rgba(245,158,11,.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,.3)', fontSize: 10 }}>
-                    {isBishop(currentUser) ? 'BISHOP REVIEW' : 'READ ONLY'}
+                    {isBishop(currentUser) ? 'BISHOP REVIEW' : 'VIEW ONLY'}
                   </span>
                 )}
                 <button className="btn btn-ghost" style={{ padding: '6px 10px', fontSize: 16 }} onClick={() => setIsActivityModalOpen(false)}>✕</button>
@@ -1302,8 +1680,8 @@ export default function App() {
             )}
 
             <form onSubmit={handleSaveActivity}>
-              <div style={{ marginBottom: 14 }}><label>Activity Title</label><input type="text" value={activityForm.title} onChange={(e) => setActivityForm({ ...activityForm, title: e.target.value })} required disabled={isReadOnly} placeholder="Title" /></div>
-              <div style={{ marginBottom: 14 }}><label>Description</label><textarea value={activityForm.description} onChange={(e) => setActivityForm({ ...activityForm, description: e.target.value })} disabled={isReadOnly} style={{ height: 70, resize: 'none' }} placeholder="Description text context..." /></div>
+              <div style={{ marginBottom: 14 }}><label>Activity Title</label><input type="text" value={activityForm.title} onChange={(e) => setActivityForm({ ...activityForm, title: e.target.value })} required disabled={isReadOnly} placeholder="Activity Title" /></div>
+              <div style={{ marginBottom: 14 }}><label>Description</label><textarea value={activityForm.description} onChange={(e) => setActivityForm({ ...activityForm, description: e.target.value })} disabled={isReadOnly} style={{ height: 70, resize: 'none' }} placeholder="ActivityDescription..." /></div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
                 <div><label>Start Time</label><input type="time" value={activityForm.startTime} onChange={(e) => setActivityForm({ ...activityForm, startTime: e.target.value })} required disabled={isReadOnly} /></div>
                 <div><label>End Time</label><input type="time" value={activityForm.endTime} onChange={(e) => setActivityForm({ ...activityForm, endTime: e.target.value })} required disabled={isReadOnly} /></div>
@@ -1312,7 +1690,7 @@ export default function App() {
               <div style={{ marginBottom: 14 }}>
                 <label>Location Classification</label>
                 <select value={locationType} onChange={(e) => { setLocationType(e.target.value); setActivityForm((prev) => ({ ...prev, location: '' })); }} disabled={isReadOnly} required>
-                  <option value="" disabled hidden>Choose Classification...</option>
+                  <option value="" disabled hidden>Choose Location...</option>
                   <option value="Talisay Stake Center">Talisay Stake Center</option>
                   <option value="Others">Others</option>
                 </select>
@@ -1331,7 +1709,7 @@ export default function App() {
               {locationType === 'Others' && (
                 <div style={{ marginBottom: 14, animation: 'fadeIn .2s ease' }}>
                   <label>Venue / Custom Location Address</label>
-                  <input type="text" placeholder="Enter custom location details..." value={activityForm.location} onChange={(e) => setActivityForm({ ...activityForm, location: e.target.value })} disabled={isReadOnly} required />
+                  <input type="text" placeholder="Enter location details..." value={activityForm.location} onChange={(e) => setActivityForm({ ...activityForm, location: e.target.value })} disabled={isReadOnly} required />
                 </div>
               )}
 
@@ -1339,27 +1717,6 @@ export default function App() {
               <div style={{ padding: '10px 14px', borderRadius: 8, marginBottom: 16, background: dark ? 'rgba(99,102,241,.08)' : '#ede9fe', border: '1px solid rgba(99,102,241,.2)', fontSize: 13, color: '#6366f1', display: 'flex', alignItems: 'center', gap: 8 }}>
                 ⧗ Duration: <strong>{calcDuration(activityForm.startTime, activityForm.endTime)}</strong>
               </div>
-
-              {canReview(currentUser) && (
-                <div style={{ marginBottom: 20 }}>
-                  <label>Action Controls</label>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    {[
-                      { val: 'approved', label: '✓ Approve Activity', cls: 'btn-success' },
-                      { val: 'rejected', label: '✕ Decline Activity', cls: 'btn-danger'  },
-                    ].map((opt) => (
-                      <button key={opt.val} type="button"
-                        className={`btn ${activityForm.status === opt.val ? opt.cls : 'btn-ghost'}`}
-                        style={{ fontSize: 12, padding: '8px 16px', flex: 1, opacity: activityForm.status === opt.val ? 1 : .6 }}
-                        onClick={() => {
-                          if (opt.val === 'rejected' && editingActivity) { setDeclineTarget(editingActivity); setIsActivityModalOpen(false); }
-                          else setActivityForm({ ...activityForm, status: opt.val });
-                        }}
-                      >{opt.label}</button>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
@@ -1376,7 +1733,7 @@ export default function App() {
                       <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${activityEmailConfirm ? '#6366f1' : t.text3}`, background: activityEmailConfirm ? '#6366f1' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all .2s' }}>
                         {activityEmailConfirm && <span style={{ color: '#fff', fontSize: 10, lineHeight: 1, fontWeight: 700 }}>✓</span>}
                       </div>
-                      <span style={{ fontSize: 12, color: activityEmailConfirm ? '#6366f1' : t.text3, fontWeight: 500 }}>Email me on approval</span>
+                      <span style={{ fontSize: 12, color: activityEmailConfirm ? '#6366f1' : t.text3, fontWeight: 500 }}>Email me the approval</span>
                     </div>
                   )}
                   <button type="button" className="btn btn-ghost" onClick={() => setIsActivityModalOpen(false)}>
