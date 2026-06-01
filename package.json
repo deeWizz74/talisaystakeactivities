@@ -13,8 +13,10 @@
     "@emailjs/browser": "^4.4.1",
     "@supabase/supabase-js": "^2.106.2",
     "bcryptjs": "^3.0.3",
+    "pdf-lib": "^1.17.1",
     "react": "^19.2.6",
-    "react-dom": "^19.2.6"
+    "react-dom": "^19.2.6",
+    "resend": "^6.12.4"
   },
   "devDependencies": {
     "@babel/core": "^7.29.0",
