@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { supabase } from './supabaseClient';
+import { supabase } from '/supabaseClient';
 import emailjs from '@emailjs/browser';
 import bcrypt from 'bcryptjs';
 
@@ -11,11 +11,109 @@ fontLink.href =
 document.head.appendChild(fontLink);
 
 // ─── Role helpers ─────────────────────────────────────────────────────────────
-const isAdmin          = (u) => !!u?.is_admin;
-const isBishop         = (u) => !u?.is_admin && u?.role === 'Agent Bishop';
-const isCommittee      = (u) => !u?.is_admin && u?.role !== 'Agent Bishop' && !!u?.is_activity_committee;
-const canReview        = (u) => isAdmin(u) || isBishop(u);
-const canViewApprovals = (u) => canReview(u) || isCommittee(u);
+// NOTE: isAdmin is reserved for true superadmin (system admin only).
+// Stake Presidency members use role === 'Stake Presidency' and is_admin === false.
+const isAdmin              = (u) => !!u?.is_admin;
+const isBishop             = (u) => !u?.is_admin && u?.role === 'Agent Bishop';
+const isPresidency         = (u) => !u?.is_admin && u?.role === 'Stake Presidency';
+const isCommittee          = (u) => !u?.is_admin && !!u?.is_activity_committee;
+const isWardChairman       = (u) => !u?.is_admin && u?.role === 'Ward Activity Chairman';
+const isClerk              = (u) => !u?.is_admin && u?.role === 'Clerk';
+// Distinguish Stake President from counselors via the 'calling' field.
+// Calling must be set correctly, e.g. "Stake President", "1st Counselor", "2nd Counselor".
+// If calling is missing/unrecognised, the user is treated as Stake President (safer fallback).
+const isStakePresident  = (u) => isPresidency(u) && (
+  /president/i.test(u?.calling || '') && !/counselor/i.test(u?.calling || '')
+  || (!u?.calling?.trim()) // no calling set → default to president slot
+);
+const isStakeCounselor  = (u) => isPresidency(u) && /counselor/i.test(u?.calling || '');
+// canSeeBudget: only Clerk, Stake Presidency, Admin, and the activity submitter may see budget figures
+const canSeeBudget = (act, u) =>
+  isAdmin(u) || isClerk(u) || isPresidency(u) || (act && u && act.user_id === u.id);
+
+const canReview         = (u) => isAdmin(u) || isBishop(u) || isPresidency(u) || isClerk(u);
+const canViewApprovals  = (u) => canReview(u) || isCommittee(u); // Ward Chairman sees only their own activities via myactivities tab
+
+// ─── Workflow helpers ──────────────────────────────────────────────────────────
+// Determine activity type from location
+const getActivityType = (location) => {
+  if (STAKE_CENTER_VENUES.includes(location)) return 'stake_center';
+  return 'stake'; // ward activities use activity_type field set on submit
+};
+
+// ─── Approval Pipelines ────────────────────────────────────────────────────────
+// Ward activity:
+//   pending  →(Agent Bishop single approval)→  approved
+//   (Ward Activity Chairman submits only — no approval rights)
+//
+// Stake activity NOT at stake center:
+//   pending  →(all committee review)→  committee_approved
+//            →(Stake President 1st)→  presidency_approved
+//            →(Stake Counselor 2nd)→  approved  ← triggers confirmation email
+//
+// Stake activity AT stake center:
+//   pending  →(all committee review)→  committee_approved
+//            →(Agent Bishop)→  bishop_approved
+//            →(Stake President 1st)→  presidency_approved
+//            →(Stake Counselor 2nd)→  approved  ← triggers confirmation email
+// ──────────────────────────────────────────────────────────────────────────────
+const nextApprovalStatus = (actType, currentStatus, approver) => {
+  if (actType === 'ward') {
+    // Ward Chairman submits only — Bishop approves once, goes directly to approved
+    if (currentStatus === 'pending' && isBishop(approver)) return 'approved';
+  }
+  // stake_center: committee → bishop → president → counselor
+  if (actType === 'stake_center') {
+    if (currentStatus === 'committee_approved' && isBishop(approver))                                         return 'bishop_approved';
+    if (currentStatus === 'bishop_approved'    && (isStakePresident(approver) || isAdmin(approver)))          return 'presidency_approved';
+    if (currentStatus === 'presidency_approved'&& (isStakeCounselor(approver) || isAdmin(approver)))          return 'approved';
+  }
+  // stake (NOT at stake center): committee → president → counselor
+  if (actType === 'stake') {
+    if (currentStatus === 'committee_approved' && (isStakePresident(approver) || isAdmin(approver)))          return 'presidency_approved';
+    if (currentStatus === 'presidency_approved'&& (isStakeCounselor(approver) || isAdmin(approver)))          return 'approved';
+  }
+  return null; // not this user's turn
+};
+
+// Can the current user approve this activity right now?
+const canApproveActivity = (act, user) => {
+  const type   = act.activity_type || getActivityType(act.location);
+  const status = act.status;
+  return nextApprovalStatus(type, status, user) !== null;
+};
+
+// Can the current user mark "reviewed"? (Committee members on pending stake activities only)
+const canReviewActivity = (act, user) => {
+  if (!isCommittee(user)) return false;
+  if (act.status !== 'pending') return false;
+  const type = act.activity_type || getActivityType(act.location);
+  return type === 'stake' || type === 'stake_center';
+};
+
+// Has this committee member already submitted their review?
+const hasReviewed = (act, user) => {
+  if (!user?.id) return false;
+  const reviews = act.reviewed_by || [];
+  return reviews.includes(String(user.id));
+};
+
+// Human-readable label for each status stage
+const statusStageLabel = (act) => {
+  const type = act.activity_type || getActivityType(act.location);
+  const s    = act.status;
+  if (s === 'approved')             return '✓ Approved';
+  if (s === 'rejected')             return '✕ Declined';
+  if (s === 'presidency_approved')  return '⏳ Awaiting 2nd Presidency Approval';
+  if (s === 'bishop_approved') return '⏳ Awaiting Stake President';
+  if (s === 'committee_approved') {
+    if (type === 'stake') return '⏳ Awaiting Stake President';
+    return '⏳ Awaiting Agent Bishop';
+  }
+  // pending
+  if (type === 'ward') return '⏳ Awaiting Agent Bishop';  // single approval → approved
+  return '⏳ Awaiting Committee Review';
+};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const STAKE_CENTER_VENUES = ['Sacrament Hall', 'Overflow', 'Cultural Hall', 'Relief Society Room', 'Courts'];
@@ -47,10 +145,17 @@ const fmt12 = (t) => {
 };
 
 const statusChip = (act) => {
+  const type = act.activity_type || getActivityType(act.location);
   const s = act.status || (act.is_approved ? 'approved' : 'pending');
-  if (s === 'approved') return { label: '✓ Approved', bg: 'rgba(16,185,129,0.15)', color: '#10b981', border: 'rgba(16,185,129,0.3)' };
-  if (s === 'rejected') return { label: '✕ Declined', bg: 'rgba(239,68,68,0.15)',  color: '#ef4444', border: 'rgba(239,68,68,0.3)'  };
-  return                       { label: '⏳ Pending',  bg: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: 'rgba(245,158,11,0.3)' };
+  if (s === 'approved')             return { label: '✓ Approved',                        bg: 'rgba(16,185,129,0.15)', color: '#10b981', border: 'rgba(16,185,129,0.3)' };
+  if (s === 'rejected')             return { label: '✕ Declined',                        bg: 'rgba(239,68,68,0.15)',  color: '#ef4444', border: 'rgba(239,68,68,0.3)'  };
+  if (s === 'presidency_approved')  return { label: '⏳ Awaiting 2nd Presidency Sign',   bg: 'rgba(139,92,246,0.15)', color: '#a78bfa', border: 'rgba(139,92,246,0.3)' };
+  if (s === 'committee_approved') {
+    if (type === 'stake') return { label: '⏳ Awaiting Stake President',  bg: 'rgba(99,102,241,0.15)', color: '#818cf8', border: 'rgba(99,102,241,0.3)' };
+    return                        { label: '⏳ Awaiting Agent Bishop',    bg: 'rgba(6,182,212,0.15)',  color: '#22d3ee', border: 'rgba(6,182,212,0.3)'  };
+  }
+  if (s === 'bishop_approved') return { label: '⏳ Awaiting Stake President', bg: 'rgba(99,102,241,0.15)', color: '#818cf8', border: 'rgba(99,102,241,0.3)' };
+  return { label: '⏳ Pending', bg: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: 'rgba(245,158,11,0.3)' };
 };
 
 const getOrgColors = (orgName, dark = true) => {
@@ -341,8 +446,9 @@ export default function App() {
   const [conflictError,       setConflictError]       = useState('');
   const [activityForm,        setActivityForm]        = useState({
     title: '', description: '', startTime: '08:00', endTime: '10:00',
-    organization: '', location: '', status: 'pending', decline_reason: '',
+    organization: '', location: '', status: 'pending', decline_reason: '', proposedBudget: '',
   });
+  const [printActivity,       setPrintActivity]       = useState(null); // activity to print payment approval
 
   // ── User modal state ────────────────────────────────────────────────────
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
@@ -392,14 +498,20 @@ export default function App() {
   const todayStr = new Date().toISOString().split('T')[0];
 
   // ── Derived lists ───────────────────────────────────────────────────────
+  // Each role only sees activities that are currently waiting on THEM.
+  // Presidency members are split: Stake President acts first (committee_approved/bishop_approved → presidency_approved),
+  // Stake Counselor acts second (presidency_approved → approved).
+  // Neither should see the activity until it reaches their specific step.
   const pendingActivitiesFiltered = activities.filter((a) => {
-    const isPending = a.status === 'pending';
-    if (isBishop(currentUser)) return isPending && STAKE_CENTER_VENUES.includes(a.location);
-    return isPending;
+    const isTerminal = a.status === 'approved' || a.status === 'rejected';
+    if (isTerminal) return false;
+    const needsMyReview   = isCommittee(currentUser) && canReviewActivity(a, currentUser) && !hasReviewed(a, currentUser);
+    const needsMyApproval = canApproveActivity(a, currentUser);
+    return needsMyReview || needsMyApproval;
   });
   const pendingCount = pendingActivitiesFiltered.length;
 
-  const myActivities = !isAdmin(currentUser) && !isBishop(currentUser) && !isCommittee(currentUser)
+  const myActivities = !isAdmin(currentUser) && !isBishop(currentUser) && !isPresidency(currentUser) && !isCommittee(currentUser)
     ? activities.filter((a) => a.user_id === currentUser?.id).sort((a, b) => b.date?.localeCompare(a.date) || 0)
     : [];
   const myPendingCount = myActivities.filter((a) => a.status === 'pending').length;
@@ -421,14 +533,15 @@ export default function App() {
     let combined = monthData || [];
     const ids = new Set(combined.map((a) => a.id));
 
-    // Admins, Bishops & Activity Committee members also fetch ALL pending rows globally
-    if (isAdmin(currentUser) || isBishop(currentUser) || isCommittee(currentUser)) {
-      const { data: pendingData } = await supabase.from('activities').select('*').eq('status', 'pending');
+    // Admins, Bishops, Presidency, Ward Chairmen, Clerks & Activity Committee members also fetch ALL in-progress rows globally
+    if (isAdmin(currentUser) || isBishop(currentUser) || isPresidency(currentUser) || isCommittee(currentUser) || isWardChairman(currentUser) || isClerk(currentUser)) {
+      const { data: pendingData } = await supabase.from('activities').select('*')
+        .not('status', 'in', '("approved","rejected")');
       if (pendingData) pendingData.forEach((a) => { if (!ids.has(a.id)) { combined.push(a); ids.add(a.id); } });
     }
 
     // Regular users: approved activities + their own submissions
-    if (!isAdmin(currentUser) && !isBishop(currentUser) && !isCommittee(currentUser)) {
+    if (!isAdmin(currentUser) && !isBishop(currentUser) && !isPresidency(currentUser) && !isCommittee(currentUser) && !isClerk(currentUser)) {
       const { data: extraData } = await supabase.from('activities').select('*').or(`status.eq.approved,user_id.eq.${currentUser.id}`);
       if (extraData) extraData.forEach((a) => { if (!ids.has(a.id)) { combined.push(a); ids.add(a.id); } });
     }
@@ -453,9 +566,13 @@ export default function App() {
 
   useEffect(() => { if (currentUser) fetchActivities(); }, [currentUser, currentDate, fetchActivities]);
   useEffect(() => {
-    if (!currentUser || !isAdmin(currentUser)) return;
-    if (adminTab === 'users') fetchUsers();
-    else if (adminTab === 'audit') fetchAuditLogs();
+    if (!currentUser) return;
+    // Admins manage users; Clerks need user list to resolve names for print
+    if (isAdmin(currentUser)) {
+      if (adminTab === 'users') fetchUsers();
+      else if (adminTab === 'audit') fetchAuditLogs();
+    }
+    if (isClerk(currentUser) && users.length === 0) fetchUsers();
   }, [currentUser, adminTab]);
 
   // ── Conflict check ──────────────────────────────────────────────────────
@@ -500,16 +617,53 @@ export default function App() {
         return;
       }
 
-      // Fetch admin, Agent Bishop, and Stake Activity Committee emails for CC
-      const { data: reviewers } = await supabase
+      // Fetch Stake President from DB directly (reliable — not dependent on in-memory state)
+      const { data: presidencyData } = await supabase
         .from('profiles')
-        .select('email')
-        .or('is_admin.eq.true,role.eq.Agent Bishop,is_activity_committee.eq.true');
+        .select('name, calling')
+        .eq('role', 'Stake Presidency')
+        .eq('is_admin', false);
+      const actType = activity.activity_type || getActivityType(activity.location);
+        const isWardActivity = actType === 'ward';
 
-      const ccEmails = (reviewers || [])
-        .map((r) => r.email?.trim())
-        .filter((e) => e && e !== profileData.email)
-        .join(',');
+        let signerName;
+        if (isWardActivity) {
+          // Ward activities — signer is the Agent Bishop
+          const { data: bishopData } = await supabase
+            .from('profiles')
+            .select('name')
+            .eq('role', 'Agent Bishop')
+            .eq('is_admin', false)
+            .single();
+          signerName = 'Bishop ' + bishopData?.name || 'Agent Bishop';
+        } else {
+          // Stake activities — signer is the Stake President
+          const stakePresidentRecord = (presidencyData || []).find(
+            (u) => /president/i.test(u.calling || '') && !/counselor/i.test(u.calling || '')
+          ) || (presidencyData || [])[0];
+          signerName = 'President ' + stakePresidentRecord?.name || 'Stake President';
+        }
+
+      // CC logic:
+      // Ward approval  → CC Agent Bishop only
+      // Stake approval → CC Committee members only
+      const ccSeen = new Set([profileData.email]);
+      let ccEmails = '';
+      if (isWardActivity) {
+        const { data: ccBishops } = await supabase
+          .from('profiles').select('email').eq('role', 'Agent Bishop').eq('is_admin', false);
+        ccEmails = (ccBishops || [])
+          .map((r) => r.email?.trim())
+          .filter((e) => e && !ccSeen.has(e) && ccSeen.add(e))
+          .join(',');
+      } else {
+        const { data: ccCommittee } = await supabase
+          .from('profiles').select('email').eq('is_activity_committee', true).eq('is_admin', false);
+        ccEmails = (ccCommittee || [])
+          .map((r) => r.email?.trim())
+          .filter((e) => e && !ccSeen.has(e) && ccSeen.add(e))
+          .join(',');
+      }
 
       await emailjs.send(
         'service_5wmibq6',
@@ -519,15 +673,14 @@ export default function App() {
           email:           profileData.email,
           user_email:      profileData.email,
           recipient_email: profileData.email,
-          to_name:         'Stake Activity Committee',
+          to_name:         profileData.name || 'Applicant',
           user_name:       profileData.name || 'Applicant',
-          temp_password:   '',
           activity_title:  activity.title,
           organization:    activity.organization || 'General',
           schedule_date:   activity.date,
           schedule_time:   `${fmt12(activity.start_time)} - ${fmt12(activity.end_time)}`,
           venue_location:  activity.location || '',
-          approval_signer: currentUser?.name || currentUser?.role || 'Administrator',
+          approval_signer: signerName,
           cc_emails:       ccEmails,
           reply_to:        profileData.email,
         },
@@ -541,18 +694,53 @@ export default function App() {
     }
   };
 
-  // ── Email: new activity submitted — notify all committee members ──────────
+  // ── Email: new activity submitted ─────────────────────────────────────────────────
+  // Ward activities  → notify Agent Bishop + submitter
+  // Stake activities → notify Committee members only
   const sendNewActivityEmail = async (activity) => {
     try {
-      const { data: committee } = await supabase
-        .from('profiles')
-        .select('email, name')
-        .or('is_admin.eq.true,role.eq.Agent Bishop,is_activity_committee.eq.true');
+      const actType = activity.activity_type || getActivityType(activity.location);
+      const isWard  = actType === 'ward';
 
-      const recipients = (committee || []).filter((r) => r.email?.trim());
+      let recipients = [];
+
+      if (isWard) {
+        // Ward: notify Agent Bishop + the submitter
+        const { data: bishopRows } = await supabase
+          .from('profiles')
+          .select('email, name')
+          .eq('role', 'Agent Bishop')
+          .eq('is_admin', false);
+        const seen = new Set();
+        for (const row of (bishopRows || [])) {
+          const e = row.email?.trim();
+          if (e && !seen.has(e)) { seen.add(e); recipients.push(row); }
+        }
+        // Also notify the submitter themselves
+        if (activity.user_id) {
+          const { data: submitterRow } = await supabase
+            .from('profiles').select('email, name').eq('id', activity.user_id).single();
+          if (submitterRow?.email?.trim() && !seen.has(submitterRow.email.trim())) {
+            recipients.push(submitterRow);
+          }
+        }
+      } else {
+        // Stake: notify Committee members only
+        const { data: committeeRows } = await supabase
+          .from('profiles')
+          .select('email, name')
+          .eq('is_activity_committee', true)
+          .eq('is_admin', false);
+        const seen = new Set();
+        for (const row of (committeeRows || [])) {
+          const e = row.email?.trim();
+          if (e && !seen.has(e)) { seen.add(e); recipients.push(row); }
+        }
+      }
+
       if (!recipients.length) return;
 
-      // Send individual email to each committee member so everyone is guaranteed to receive it
+      // Send individual email to each recipient
       await Promise.all(
         recipients.map((r) =>
           emailjs.send(
@@ -571,7 +759,7 @@ export default function App() {
               schedule_date:   activity.date,
               schedule_time:   `${fmt12(activity.start_time)} - ${fmt12(activity.end_time)}`,
               venue_location:  activity.location || '',
-              approval_signer: `New request by ${activity.submitter_name || 'a member'}`,
+              approval_signer: activity.submitter_name || 'a member',
               reply_to:        r.email.trim(),
             },
             'nu1KpRQC1JdQv3ZDN'
@@ -596,6 +784,7 @@ export default function App() {
         .from('activities')
         .select('*')
         .eq('status', 'pending')
+        .neq('activity_type', 'ward')
         .eq('date', targetDate);
 
       if (!pending?.length) return;
@@ -603,34 +792,36 @@ export default function App() {
       const { data: committee } = await supabase
         .from('profiles')
         .select('email, name')
-        .or('is_admin.eq.true,role.eq.Agent Bishop,is_activity_committee.eq.true');
+        .or('is_admin.eq.true,role.eq.Agent Bishop,role.eq.Stake Presidency,is_activity_committee.eq.true');
 
       const recipients = (committee || []).filter((r) => r.email?.trim());
       if (!recipients.length) return;
 
-      const toEmail = recipients[0].email.trim();
-
       for (const act of pending) {
-        await emailjs.send(
-          'service_kmrplqp',
-          'template_i5crz87',
-          {
-            to_email:        toEmail,
-            email:           toEmail,
-            user_email:      toEmail,
-            recipient_email: toEmail,
-            to_name:         'Stake Activity Committee',
-            user_name:       'Activity Committee',
-            temp_password:   '',
-            activity_title:  `⚠ PENDING (1 week away): ${act.title}`,
-            organization:    act.organization || 'General',
-            schedule_date:   act.date,
-            schedule_time:   `${fmt12(act.start_time)} - ${fmt12(act.end_time)}`,
-            venue_location:  act.location || '',
-            approval_signer: 'Automated Reminder — needs approval',
-            reply_to:        toEmail,
-          },
-          'nu1KpRQC1JdQv3ZDN'
+        await Promise.all(
+          recipients.map((r) =>
+            emailjs.send(
+              'service_kmrplqp',
+              'template_i5crz87',
+              {
+                to_email:        r.email.trim(),
+                email:           r.email.trim(),
+                user_email:      r.email.trim(),
+                recipient_email: r.email.trim(),
+                to_name:         r.name || 'Committee Member',
+                user_name:       'Activity Committee',
+                temp_password:   '',
+                activity_title:  `⚠ PENDING (1 week away): ${act.title}`,
+                organization:    act.organization || 'General',
+                schedule_date:   act.date,
+                schedule_time:   `${fmt12(act.start_time)} - ${fmt12(act.end_time)}`,
+                venue_location:  act.location || '',
+                approval_signer: 'Automated Reminder — needs approval',
+                reply_to:        r.email.trim(),
+              },
+              'nu1KpRQC1JdQv3ZDN'
+            )
+          )
         );
       }
     } catch (err) {
@@ -758,11 +949,12 @@ export default function App() {
         location:     activity.location || '',
         status:       activity.status || (activity.is_approved ? 'approved' : 'pending'),
         decline_reason: activity.decline_reason || '',
+        proposedBudget: activity.proposed_budget != null ? String(activity.proposed_budget) : '',
       });
       if (STAKE_CENTER_VENUES.includes(activity.location)) setLocationType('Talisay Stake Center');
       else if (activity.location) setLocationType('Others');
       else setLocationType('');
-      setIsReadOnly(isBishop(currentUser) || (!isAdmin(currentUser) && activity.user_id !== currentUser?.id));
+      setIsReadOnly(isWardChairman(currentUser) || isBishop(currentUser) || isPresidency(currentUser) || isClerk(currentUser) || (!isAdmin(currentUser) && activity.user_id !== currentUser?.id));
     } else {
       setEditingActivity(null);
       setIsReadOnly(false);
@@ -770,7 +962,7 @@ export default function App() {
       setActivityForm({
         title: '', description: '', startTime: '08:00', endTime: '10:00',
         organization: currentUser?.organization || '',
-        location: '', status: isAdmin(currentUser) ? 'approved' : 'pending', decline_reason: '',
+        location: '', status: isAdmin(currentUser) ? 'approved' : 'pending', decline_reason: '', proposedBudget: '',
       });
     }
     setIsActivityModalOpen(true);
@@ -784,24 +976,49 @@ export default function App() {
   const handleSaveActivity = async (e) => {
     e.preventDefault();
     if (!selectedDateStr) { showToast('Please choose a day on the calendar first.', 'error'); return; }
+
+    // Determine activity type:
+    // - Ward Chairman submitting → ward activity
+    // - Anyone submitting at Stake Center venue → stake_center
+    // - Anyone else → stake
+    let activityType = editingActivity?.activity_type || 'stake';
+    if (!editingActivity) {
+      if (isWardChairman(currentUser)) {
+        activityType = 'ward';
+      } else if (STAKE_CENTER_VENUES.includes(activityForm.location)) {
+        activityType = 'stake_center';
+      } else {
+        activityType = 'stake';
+      }
+    }
+
     const payload = {
-      title:       activityForm.title,
-      description: activityForm.description || '',
-      date:        selectedDateStr,
-      start_time:  activityForm.startTime,
-      end_time:    activityForm.endTime,
-      location:    activityForm.location,
-      organization: currentUser?.organization || 'General',
-      status:      isAdmin(currentUser) ? 'approved' : 'pending',
-      is_approved: isAdmin(currentUser),
-      user_id:     currentUser?.id,
+      title:         activityForm.title,
+      description:   activityForm.description || '',
+      date:          selectedDateStr,
+      start_time:    activityForm.startTime,
+      end_time:      activityForm.endTime,
+      location:      activityForm.location,
+      organization:  currentUser?.organization || 'General',
+      activity_type: activityType,
+      status:        isAdmin(currentUser) ? 'approved' : 'pending',
+      is_approved:   isAdmin(currentUser),
+      user_id:       currentUser?.id,
+      proposed_budget: activityForm.proposedBudget !== '' ? parseFloat(activityForm.proposedBudget) || null : null,
     };
     try {
       if (editingActivity) {
-        const { error } = await supabase.from('activities').update(payload).eq('id', editingActivity.id);
+        // Presidency can only update the proposed_budget field, not other details
+        const updatePayload = isPresidency(currentUser)
+          ? { proposed_budget: activityForm.proposedBudget !== '' ? parseFloat(activityForm.proposedBudget) || null : null }
+          : payload;
+        const { error } = await supabase.from('activities').update(updatePayload).eq('id', editingActivity.id);
         if (error) throw error;
-        await writeAuditLog(currentUser.id, currentUser.name, 'UPDATE', `Updated activity: "${activityForm.title}"`);
-        showToast('Activity updated successfully.');
+        await writeAuditLog(currentUser.id, currentUser.name, 'UPDATE',
+          isPresidency(currentUser)
+            ? `Updated proposed budget for: "${activityForm.title}" → ₱${activityForm.proposedBudget}`
+            : `Updated activity: "${activityForm.title}"`);
+        showToast(isPresidency(currentUser) ? 'Proposed budget saved.' : 'Activity updated successfully.');
       } else {
         const { error } = await supabase.from('activities').insert([payload]);
         if (error) throw error;
@@ -832,17 +1049,82 @@ export default function App() {
   };
 
   const handleQuickApprove = async (activity) => {
+    const actType = activity.activity_type || getActivityType(activity.location);
+    const next    = nextApprovalStatus(actType, activity.status, currentUser);
+    if (!next) { showToast('You cannot approve this activity at this stage.', 'error'); return; }
+
+    const isFinalApproval = next === 'approved';
     try {
       const { data: updated, error } = await supabase.from('activities')
-        .update({ status: 'approved', is_approved: true })
+        .update({ status: next, is_approved: isFinalApproval })
         .eq('id', activity.id).select().single();
       if (error) throw error;
       setActivities((prev) => prev.map((a) => (a.id === activity.id ? updated : a)));
-      await writeAuditLog(currentUser.id, currentUser.name, 'UPDATE', `Approved: "${activity.title}"`);
-      await sendApprovalEmail(updated);
-      showToast(`"${activity.title}" approved — notification email sent!`);
+      await writeAuditLog(currentUser.id, currentUser.name, 'UPDATE',
+        `Approved (${next}): "${activity.title}"`);
+      if (isFinalApproval) {
+        await sendApprovalEmail(updated);
+        showToast(`"${activity.title}" fully approved — notification sent!`);
+      } else {
+        const actTypeForLabel = activity.activity_type || getActivityType(activity.location);
+        const stageLabels = {
+          bishop_approved:     'forwarded to Stake President',
+          committee_approved:  actTypeForLabel === 'stake' ? 'forwarded to Stake President' : 'forwarded to Agent Bishop',
+          presidency_approved: 'forwarded to Stake Counselor for 2nd signature',
+        };
+        showToast(`"${activity.title}" ${stageLabels[next] || 'advanced'}.`);
+      }
     } catch (err) {
       showToast(`Approval failed: ${err.message}`, 'error');
+    }
+  };
+
+  // Committee members mark an activity as "reviewed" — once ALL committee members
+  // have reviewed, the activity automatically advances to committee_approved.
+  const handleCommitteeReview = async (activity) => {
+    if (!isCommittee(currentUser)) return;
+    if (hasReviewed(activity, currentUser)) { showToast('You have already reviewed this activity.', 'error'); return; }
+
+    try {
+      // Fetch latest reviewed_by from DB to avoid race conditions
+      const { data: fresh, error: fetchErr } = await supabase
+        .from('activities').select('reviewed_by').eq('id', activity.id).single();
+      if (fetchErr) throw fetchErr;
+
+      const existingReviews = fresh?.reviewed_by || [];
+      const updatedReviews  = [...new Set([...existingReviews, String(currentUser.id)])];
+
+      // Fetch all active committee members to know how many are required
+      const { data: allCommittee } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('is_activity_committee', true)
+        .eq('is_admin', false)
+        .not('role', 'in', '{"Agent Bishop","Stake Presidency"}');
+
+      const totalCommittee  = (allCommittee || []).length;
+      const allReviewed     = totalCommittee > 0 && updatedReviews.length >= totalCommittee;
+      const newStatus       = allReviewed ? 'committee_approved' : activity.status;
+
+      const { data: updated, error } = await supabase.from('activities')
+        .update({ reviewed_by: updatedReviews, status: newStatus })
+        .eq('id', activity.id).select().single();
+      if (error) throw error;
+
+      setActivities((prev) => prev.map((a) => (a.id === activity.id ? updated : a)));
+      await writeAuditLog(currentUser.id, currentUser.name, 'UPDATE',
+        `Committee reviewed: "${activity.title}" (${updatedReviews.length}/${totalCommittee} reviews)`);
+
+      if (allReviewed) {
+        const forwardTo = (activity.activity_type || getActivityType(activity.location)) === 'stake'
+          ? 'Stake President'
+          : 'Agent Bishop';
+        showToast(`"${activity.title}" — all committee members reviewed. Forwarded to ${forwardTo}.`);
+      } else {
+        showToast(`"${activity.title}" marked as reviewed. (${updatedReviews.length}/${totalCommittee} reviews)`);
+      }
+    } catch (err) {
+      showToast(`Review failed: ${err.message}`, 'error');
     }
   };
 
@@ -1165,8 +1447,8 @@ export default function App() {
   const tabs = [
     { key: 'dashboard', label: '⬡ Dashboard' },
     { key: 'calendar',  label: '⊞ Calendar'  },
-    ...(!isAdmin(currentUser) && !isBishop(currentUser) && !isCommittee(currentUser) ? [{ key: 'myactivities', label: `◉ My Activities${myPendingCount > 0 ? ` (${myPendingCount})` : ''}` }] : []),
-    ...(canViewApprovals(currentUser) ? [{ key: 'approvals', label: `✦ Approvals${pendingCount > 0 ? ` (${pendingCount})` : ''}` }] : []),
+    ...(!isAdmin(currentUser) && !isBishop(currentUser) && !isPresidency(currentUser) && !isCommittee(currentUser) && !isClerk(currentUser) ? [{ key: 'myactivities', label: `◉ My Activities${myPendingCount > 0 ? ` (${myPendingCount})` : ''}` }] : []),
+    ...(canViewApprovals(currentUser) ? [{ key: 'approvals', label: isClerk(currentUser) ? '◎ All Activities' : `✦ Approvals${pendingCount > 0 ? ` (${pendingCount})` : ''}` }] : []),
     ...(isAdmin(currentUser) ? [
       { key: 'users',     label: '◈ Users'     },
       { key: 'analytics', label: '▲ Analytics' },
@@ -1175,11 +1457,17 @@ export default function App() {
   ];
 
   const roleBadge = isAdmin(currentUser)
-    ? { label: 'ADMIN',      bg: 'rgba(99,102,241,.15)', color: '#6366f1', border: 'rgba(99,102,241,.3)' }
+    ? { label: 'SYS ADMIN',      bg: 'rgba(239,68,68,.15)',   color: '#ef4444', border: 'rgba(239,68,68,.3)'   }
     : isBishop(currentUser)
-    ? { label: 'BISHOP',     bg: 'rgba(6,182,212,.15)',  color: '#06b6d4', border: 'rgba(6,182,212,.3)'  }
+    ? { label: 'BISHOP',         bg: 'rgba(6,182,212,.15)',   color: '#06b6d4', border: 'rgba(6,182,212,.3)'   }
+    : isPresidency(currentUser)
+    ? { label: 'PRESIDENCY',     bg: 'rgba(99,102,241,.15)',  color: '#818cf8', border: 'rgba(99,102,241,.3)'  }
+    : isWardChairman(currentUser)
+    ? { label: 'WARD CHAIRMAN',  bg: 'rgba(16,185,129,.15)',  color: '#10b981', border: 'rgba(16,185,129,.3)'  }
+    : isClerk(currentUser)
+    ? { label: 'CLERK',          bg: 'rgba(168,85,247,.15)',  color: '#a855f7', border: 'rgba(168,85,247,.3)'  }
     : isCommittee(currentUser)
-    ? { label: 'COMMITTEE',  bg: 'rgba(245,158,11,.15)', color: '#f59e0b', border: 'rgba(245,158,11,.3)' }
+    ? { label: 'COMMITTEE',      bg: 'rgba(245,158,11,.15)',  color: '#f59e0b', border: 'rgba(245,158,11,.3)'  }
     : null;
 
   return (
@@ -1207,10 +1495,6 @@ export default function App() {
             <div style={{ width: 36, height: 36, borderRadius: 10, background: 'linear-gradient(135deg,#6366f1,#4f46e5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, boxShadow: '0 4px 12px rgba(99,102,241,.35)', flexShrink: 0 }}>⛪</div>
             <div>
               <div style={{ fontSize: 14, fontWeight: 700, color: t.text1, lineHeight: 1 }}>Stake Calendar</div>
-              <div style={{ fontSize: 11, color: t.text3, marginTop: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
-                {currentUser.name}{currentUser.calling ? ` · ${currentUser.calling}` : ''}
-                {roleBadge && <span style={{ fontSize: 10, fontWeight: 700, background: roleBadge.bg, color: roleBadge.color, padding: '1px 7px', borderRadius: 20, border: `1px solid ${roleBadge.border}` }}>{roleBadge.label}</span>}
-              </div>
             </div>
           </div>
           {/* ── User dropdown ── */}
@@ -1224,6 +1508,9 @@ export default function App() {
                 {(currentUser.name || currentUser.username || '?')[0].toUpperCase()}
               </span>
               <span style={{ color: t.text2, maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentUser.name || currentUser.username}</span>
+              <span style={{ fontSize: 11, color: t.text3, overflow: 'hidden', textOverflow: 'ellipsis', alignItems: 'center', whiteSpace: 'nowrap' }}>
+                {currentUser.calling ? ` · ${currentUser.calling}` : ''}
+              </span>
               <span style={{ color: t.text3, fontSize: 10 }}>{userMenuOpen ? '▲' : '▼'}</span>
             </button>
 
@@ -1396,7 +1683,18 @@ export default function App() {
                       <div style={{ padding: '24px', textAlign: 'center', background: t.surfaceCard, borderRadius: 10, border: `1px dashed ${t.emptyBorder}`, color: t.emptyColor, fontSize: 13 }}>{emptyMsg}</div>
                     ) : (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                        {items.map((act) => <ActivityCard key={act.id} act={act} dark={dark} t={t} onClick={() => openActivityModal(act.date, act)} />)}
+                        {items.map((act) => (
+                          <div key={act.id} style={{ position: 'relative' }}>
+                            <ActivityCard act={act} dark={dark} t={t} onClick={() => openActivityModal(act.date, act)} />
+                            {act.status === 'approved' && (
+                              <button
+                                className="btn btn-primary"
+                                style={{ position: 'absolute', top: 10, right: 10, fontSize: 11, padding: '5px 10px', zIndex: 1 }}
+                                onClick={(e) => { e.stopPropagation(); setPrintActivity(act); }}
+                              >🖨 Print PAF</button>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -1409,56 +1707,107 @@ export default function App() {
           {adminTab === 'approvals' && canViewApprovals(currentUser) && (
             <div>
               <div style={{ marginBottom: 24 }}>
-                <h2 style={{ fontSize: 22, fontWeight: 700, color: t.text1, marginBottom: 4 }}>Pending Approvals ({pendingCount})</h2>
+                <h2 style={{ fontSize: 22, fontWeight: 700, color: t.text1, marginBottom: 4 }}>
+                  {isClerk(currentUser) ? 'All Activities' : `Pending Approvals (${pendingCount})`}
+                </h2>
                 <p style={{ fontSize: 13, color: t.text3 }}>
-                  {isBishop(currentUser) ? 'Review facility requests inside Talisay Stake Center.'
-                    : isCommittee(currentUser) ? 'Activities pending approval — committee view only.'
+                  {isBishop(currentUser)          ? 'Approve ward activities and stake activities held at the stake center.'
+                    : isStakePresident(currentUser) ? 'First presidency signature for stake activities. Forwards to a counselor for the 2nd signature.'
+                    : isStakeCounselor(currentUser) ? 'Second presidency signature for stake activities. Your approval is the final step.'
+                    : isPresidency(currentUser)   ? 'Stake Presidency approval for stake activities.'
+                    : isWardChairman(currentUser) ? 'Track your submitted ward activities. The Agent Bishop handles approval.'
+                    : isClerk(currentUser)        ? 'View all activities. Open any approved activity to print a Payment Approval form.'
+                    : isCommittee(currentUser)    ? 'Mark activities as reviewed. All members must review before it advances to approval.'
                     : 'Activities pending approval.'}
                 </p>
               </div>
-              {pendingActivitiesFiltered.length === 0 ? (
-                <div style={{ padding: '60px 40px', textAlign: 'center', background: t.surfaceCard, borderRadius: 14, border: `1px dashed ${t.emptyBorder}`, color: t.emptyColor, fontSize: 14 }}>🎉 No pending requests to evaluate.</div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {pendingActivitiesFiltered.map((act) => {
-                    const p = getOrgColors(act.organization, dark);
-                    const d = new Date(act.date + 'T00:00:00');
-                    return (
-                      <div key={act.id} className="approval-card" style={{ borderLeft: '4px solid #f59e0b' }}>
-                        <div style={{ display: 'flex' }}>
-                          <div style={{ minWidth: 80, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '16px 20px', background: t.pendingDateBg, borderRight: `1px solid ${t.border}` }}>
-                            <span style={{ fontSize: 10, fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase' }}>{d.toLocaleDateString('en-US', { weekday: 'short' })}</span>
-                            <span style={{ fontSize: 28, fontWeight: 800, color: t.text1, lineHeight: 1 }}>{d.getDate()}</span>
-                            <span style={{ fontSize: 10, color: t.text3 }}>{d.toLocaleDateString('en-US', { month: 'short' })}</span>
-                          </div>
-                          <div style={{ padding: '16px 20px', flexGrow: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <div>
-                              <span style={{ background: p.bg, color: p.text, border: `1px solid ${p.border}`, padding: '2px 9px', borderRadius: 20, fontSize: 10, fontWeight: 700 }}>{act.organization || 'General'}</span>
-                              <h4 style={{ fontSize: 15, fontWeight: 700, color: t.text1, margin: '7px 0 5px' }}>{act.title}</h4>
-                              <div style={{ display: 'flex', gap: 12, fontSize: 12, color: t.text2 }}>
-                                <span>⏰ {fmt12(act.start_time)} – {fmt12(act.end_time)}</span>
-                                {act.location && <span style={{ color: '#6366f1' }}>📍 {act.location}</span>}
-                              </div>
-                              {act.description && <p style={{ margin: '5px 0 0', fontSize: 12, color: t.text3, fontStyle: 'italic' }}>"{act.description}"</p>}
+              {/* For Clerk: show ALL activities (all statuses). For others: pending only. */}
+              {(() => {
+                const displayList = isClerk(currentUser) ? [...activities].sort((a, b) => b.date?.localeCompare(a.date) || 0) : pendingActivitiesFiltered;
+                const emptyMsg = isClerk(currentUser) ? '📭 No activities found.' : '🎉 No pending requests to evaluate.';
+                return displayList.length === 0 ? (
+                  <div style={{ padding: '60px 40px', textAlign: 'center', background: t.surfaceCard, borderRadius: 14, border: `1px dashed ${t.emptyBorder}`, color: t.emptyColor, fontSize: 14 }}>{emptyMsg}</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {displayList.map((act) => {
+                      const p = getOrgColors(act.organization, dark);
+                      const d = new Date(act.date + 'T00:00:00');
+                      const chip = statusChip(act);
+                      const dateBg = act.status === 'approved' ? t.approvalDateBg : act.status === 'rejected' ? t.declinedDateBg : t.pendingDateBg;
+                      const leftBorder = act.status === 'approved' ? '#10b981' : act.status === 'rejected' ? '#ef4444' : '#f59e0b';
+                      return (
+                        <div key={act.id} className="approval-card" style={{ borderLeft: `4px solid ${leftBorder}` }}>
+                          <div style={{ display: 'flex' }}>
+                            <div style={{ minWidth: 80, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '16px 20px', background: dateBg, borderRight: `1px solid ${t.border}` }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, color: leftBorder, textTransform: 'uppercase' }}>{d.toLocaleDateString('en-US', { weekday: 'short' })}</span>
+                              <span style={{ fontSize: 28, fontWeight: 800, color: t.text1, lineHeight: 1 }}>{d.getDate()}</span>
+                              <span style={{ fontSize: 10, color: t.text3 }}>{d.toLocaleDateString('en-US', { month: 'short' })}</span>
                             </div>
-                            <div style={{ display: 'flex', gap: 8, marginLeft: 16, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                              {canReview(currentUser) && (
-                                <>
-                                  <button className="btn btn-success" style={{ fontSize: 12, padding: '8px 14px' }} onClick={() => handleQuickApprove(act)}>✓ Approve</button>
-                                  <button className="btn btn-danger"  style={{ fontSize: 12, padding: '8px 14px' }} onClick={() => setDeclineTarget(act)}>✕ Decline</button>
-                                </>
-                              )}
-                              <button className="btn btn-ghost" style={{ fontSize: 12, padding: '8px 14px' }} onClick={() => openActivityModal(act.date, act)}>
-                                View Info
-                              </button>
+                            <div style={{ padding: '16px 20px', flexGrow: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <div>
+                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
+                                  <span style={{ background: p.bg, color: p.text, border: `1px solid ${p.border}`, padding: '2px 9px', borderRadius: 20, fontSize: 10, fontWeight: 700 }}>{act.organization || 'General'}</span>
+                                  {(() => {
+                                    const type = act.activity_type || getActivityType(act.location);
+                                    const typeLabel = type === 'ward' ? '🏠 Ward' : type === 'stake_center' ? '🏛 Stake+Center' : '⭐ Stake';
+                                    return <span style={{ background: 'rgba(99,102,241,.12)', color: '#818cf8', border: '1px solid rgba(99,102,241,.25)', padding: '2px 9px', borderRadius: 20, fontSize: 10, fontWeight: 700 }}>{typeLabel}</span>;
+                                  })()}
+                                  {isClerk(currentUser) && (
+                                    <span className="badge" style={{ background: chip.bg, color: chip.color, border: `1px solid ${chip.border}`, fontSize: 9 }}>{chip.label}</span>
+                                  )}
+                                </div>
+                                <h4 style={{ fontSize: 15, fontWeight: 700, color: t.text1, margin: '7px 0 5px' }}>{act.title}</h4>
+                                <div style={{ display: 'flex', gap: 12, fontSize: 12, color: t.text2 }}>
+                                  <span>⏰ {fmt12(act.start_time)} – {fmt12(act.end_time)}</span>
+                                  {act.location && <span style={{ color: '#6366f1' }}>📍 {act.location}</span>}
+                                </div>
+                                {act.description && <p style={{ margin: '5px 0 0', fontSize: 12, color: t.text3, fontStyle: 'italic' }}>"{act.description}"</p>}
+                                {/* Proposed budget — visible to Clerk, Stake Presidency, and the submitter only */}
+                                {canSeeBudget(act, currentUser) && act.proposed_budget != null && (
+                                  <div style={{ marginTop: 6, fontSize: 12, color: '#10b981', fontWeight: 600 }}>
+                                    💰 Budget: ₱{Number(act.proposed_budget).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                                  </div>
+                                )}
+                                {/* Review progress for pending stake/stake_center activities */}
+                                {act.status === 'pending' && !isClerk(currentUser) && (() => {
+                                  const type = act.activity_type || getActivityType(act.location);
+                                  if (type !== 'stake' && type !== 'stake_center') return null;
+                                  const reviews = act.reviewed_by || [];
+                                  const myReviewed = reviews.includes(String(currentUser?.id));
+                                  return (
+                                    <div style={{ marginTop: 6, fontSize: 11, color: myReviewed ? '#10b981' : '#f59e0b', display: 'flex', alignItems: 'center', gap: 5 }}>
+                                      <span>{myReviewed ? '✓' : '⏳'}</span>
+                                      <span>{reviews.length} committee member{reviews.length !== 1 ? 's' : ''} reviewed{myReviewed ? ' (including you)' : ''}</span>
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                              <div style={{ display: 'flex', gap: 8, marginLeft: 16, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                {/* Committee review button — shown if they haven't reviewed yet and activity is pending */}
+                                {isCommittee(currentUser) && canReviewActivity(act, currentUser) && !hasReviewed(act, currentUser) && (
+                                  <button className="btn btn-warning" style={{ fontSize: 12, padding: '8px 14px' }} onClick={() => handleCommitteeReview(act)}>👁 Mark Reviewed</button>
+                                )}
+                                {/* Approve / Decline — shown for Bishop, Presidency, Ward Chairman */}
+                                {canApproveActivity(act, currentUser) && (
+                                  <>
+                                    <button className="btn btn-success" style={{ fontSize: 12, padding: '8px 14px' }} onClick={() => handleQuickApprove(act)}>✓ Approve</button>
+                                    <button className="btn btn-danger"  style={{ fontSize: 12, padding: '8px 14px' }} onClick={() => setDeclineTarget(act)}>✕ Decline</button>
+                                  </>
+                                )}
+                                {/* Clerk: print button for approved activities */}
+                                {isClerk(currentUser) && act.status === 'approved' && (
+                                  <button className="btn btn-primary" style={{ fontSize: 12, padding: '8px 14px' }} onClick={() => setPrintActivity(act)}>🖨 Print</button>
+                                )}
+                                <button className="btn btn-ghost" style={{ fontSize: 12, padding: '8px 14px' }} onClick={() => openActivityModal(act.date, act)}>View Info</button>
+                              </div>
                             </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                      );
+                    })}
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -1482,9 +1831,15 @@ export default function App() {
                         <td>
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                           {u.is_admin
-                            ? <span className="badge" style={{ background: 'rgba(99,102,241,.15)', color: '#6366f1', border: '1px solid rgba(99,102,241,.3)' }}>Admin</span>
+                            ? <span className="badge" style={{ background: 'rgba(239,68,68,.15)', color: '#ef4444', border: '1px solid rgba(239,68,68,.3)' }}>System Admin</span>
                             : u.role === 'Agent Bishop'
                             ? <span className="badge" style={{ background: 'rgba(6,182,212,.15)', color: '#06b6d4', border: '1px solid rgba(6,182,212,.3)' }}>Approving Bishop</span>
+                            : u.role === 'Stake Presidency'
+                            ? <span className="badge" style={{ background: 'rgba(99,102,241,.15)', color: '#818cf8', border: '1px solid rgba(99,102,241,.3)' }}>Stake Presidency</span>
+                            : u.role === 'Ward Activity Chairman'
+                            ? <span className="badge" style={{ background: 'rgba(16,185,129,.15)', color: '#10b981', border: '1px solid rgba(16,185,129,.3)' }}>Ward Chairman</span>
+                            : u.role === 'Clerk'
+                            ? <span className="badge" style={{ background: 'rgba(168,85,247,.15)', color: '#a855f7', border: '1px solid rgba(168,85,247,.3)' }}>Clerk</span>
                             : <span className="badge" style={{ background: dark ? 'rgba(30,41,59,.8)' : '#f1f5f9', color: t.text3, border: `1px solid ${t.border}` }}>Member</span>
                           }
                           {u.is_activity_committee && (
@@ -1643,7 +1998,7 @@ export default function App() {
               {/* Footer */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 12, borderTop: `1px solid ${t.border}` }}>
                 <button className="btn btn-ghost" onClick={() => setIsDayModalOpen(false)}>Close</button>
-                {!isBishop(currentUser) && (
+                {!isBishop(currentUser) && !isPresidency(currentUser) && (
                   <button className="btn btn-success" onClick={() => { setIsDayModalOpen(false); openActivityModal(dayModalDate, null); }}>
                     + Add New Activity
                   </button>
@@ -1665,7 +2020,14 @@ export default function App() {
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {isReadOnly && (
                   <span className="badge" style={{ background: 'rgba(245,158,11,.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,.3)', fontSize: 10 }}>
-                    {isBishop(currentUser) ? 'BISHOP REVIEW' : 'VIEW ONLY'}
+                    {isBishop(currentUser) && isCommittee(currentUser) ? 'BISHOP + COMMITTEE'
+                      : isPresidency(currentUser) && isCommittee(currentUser) ? 'PRESIDENCY + COMMITTEE'
+                      : isBishop(currentUser) ? 'BISHOP REVIEW'
+                      : isPresidency(currentUser) ? 'PRESIDENCY REVIEW'
+                      : isWardChairman(currentUser) ? 'CHAIRMAN REVIEW'
+                      : isClerk(currentUser) ? 'CLERK VIEW'
+                      : isCommittee(currentUser) ? 'COMMITTEE REVIEW'
+                      : 'VIEW ONLY'}
                   </span>
                 )}
                 <button className="btn btn-ghost" style={{ padding: '6px 10px', fontSize: 16 }} onClick={() => setIsActivityModalOpen(false)}>✕</button>
@@ -1678,6 +2040,46 @@ export default function App() {
                 <strong>✕ Declined:</strong> {editingActivity.decline_reason}
               </div>
             )}
+
+            {/* ── Workflow pipeline banner ── */}
+            {editingActivity && (() => {
+              const type = editingActivity.activity_type || getActivityType(editingActivity.location);
+              const s    = editingActivity.status;
+              const chains = {
+                ward:         ['pending', 'approved'],
+                stake:        ['pending', 'committee_approved', 'presidency_approved', 'approved'],
+                stake_center: ['pending', 'committee_approved', 'bishop_approved', 'presidency_approved', 'approved'],
+              };
+              const labels = {
+                pending:             type === 'ward' ? 'Agent Bishop (1 approval)' : 'Committee Review',
+                committee_approved:  type === 'stake' ? 'Stake President' : 'Agent Bishop',
+                bishop_approved:     'Stake President',
+                presidency_approved: 'Stake Counselor (2nd Sign)',
+                approved:            '✓ Done',
+              };
+              const chain = chains[type] || chains.stake;
+              const currentIdx = chain.indexOf(s === 'approved' ? 'approved' : s === 'rejected' ? chain[0] : s);
+              return (
+                <div style={{ padding: '10px 14px', borderRadius: 8, marginBottom: 16, background: dark ? 'rgba(99,102,241,.07)' : '#ede9fe', border: '1px solid rgba(99,102,241,.2)', fontSize: 11, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 700, color: '#818cf8', marginRight: 4 }}>
+                    {type === 'ward' ? '🏠 Ward' : type === 'stake_center' ? '🏛 Stake+Center' : '⭐ Stake'} workflow:
+                  </span>
+                  {chain.map((step, i) => {
+                    const done    = i < currentIdx || s === 'approved';
+                    const current = i === currentIdx && s !== 'approved' && s !== 'rejected';
+                    return (
+                      <React.Fragment key={step}>
+                        {i > 0 && <span style={{ color: t.text3 }}>→</span>}
+                        <span style={{ fontWeight: current ? 700 : 400, color: done ? '#10b981' : current ? '#f59e0b' : t.text3, textDecoration: done ? 'none' : 'none' }}>
+                          {done && i < chain.length - 1 ? '✓ ' : current ? '⏳ ' : ''}{labels[step] || step}
+                        </span>
+                      </React.Fragment>
+                    );
+                  })}
+                  {s === 'rejected' && <span style={{ color: '#ef4444', fontWeight: 700 }}> — Declined</span>}
+                </div>
+              );
+            })()}
 
             <form onSubmit={handleSaveActivity}>
               <div style={{ marginBottom: 14 }}><label>Activity Title</label><input type="text" value={activityForm.title} onChange={(e) => setActivityForm({ ...activityForm, title: e.target.value })} required disabled={isReadOnly} placeholder="Activity Title" /></div>
@@ -1694,6 +2096,18 @@ export default function App() {
                   <option value="Talisay Stake Center">Talisay Stake Center</option>
                   <option value="Others">Others</option>
                 </select>
+                {/* Workflow hint for submitters */}
+                {!isReadOnly && !editingActivity && locationType && (() => {
+                  let hint = '';
+                  if (isWardChairman(currentUser)) {
+                    hint = '🏠 Ward Activity → Agent Bishop → Agent Bishop (Final) → Calendar';
+                  } else if (locationType === 'Talisay Stake Center') {
+                    hint = '🏛 Stake+Center → All Committee Review → Agent Bishop → Stake Presidency → Calendar';
+                  } else {
+                    hint = '⭐ Stake Activity → All Committee Review → Agent Bishop → Stake Presidency → Calendar';
+                  }
+                  return <div style={{ marginTop: 6, fontSize: 11, color: '#818cf8', fontStyle: 'italic' }}>{hint}</div>;
+                })()}
               </div>
 
               {locationType === 'Talisay Stake Center' && (
@@ -1714,18 +2128,62 @@ export default function App() {
               )}
 
               <div style={{ marginBottom: 14 }}><label>Organization</label><input type="text" value={activityForm.organization} disabled /></div>
+
+              {/* ── Proposed Budget ── visible to submitter (editable), Presidency (editable during review), Clerk (read-only) */}
+              {(editingActivity ? canSeeBudget(editingActivity, currentUser) : !isAdmin(currentUser) && !isBishop(currentUser) && !isCommittee(currentUser) && !isWardChairman(currentUser)) && (
+                <div style={{ marginBottom: 14 }}>
+                  <label>Proposed Budget (₱)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="0.00"
+                    value={activityForm.proposedBudget}
+                    onChange={(e) => setActivityForm({ ...activityForm, proposedBudget: e.target.value })}
+                    disabled={isBishop(currentUser) || isWardChairman(currentUser) || isClerk(currentUser) || (isReadOnly && !isPresidency(currentUser))}
+                  />
+                  {isPresidency(currentUser) && editingActivity && (
+                    <div style={{ marginTop: 5, fontSize: 11, color: '#818cf8', fontStyle: 'italic' }}>
+                      ✎ As Stake Presidency, you may adjust the proposed budget before final approval.
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div style={{ padding: '10px 14px', borderRadius: 8, marginBottom: 16, background: dark ? 'rgba(99,102,241,.08)' : '#ede9fe', border: '1px solid rgba(99,102,241,.2)', fontSize: 13, color: '#6366f1', display: 'flex', alignItems: 'center', gap: 8 }}>
                 ⧗ Duration: <strong>{calcDuration(activityForm.startTime, activityForm.endTime)}</strong>
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
-                  {editingActivity && !isReadOnly && !isBishop(currentUser) && (
+                  {editingActivity && !isReadOnly && !isBishop(currentUser) && !isWardChairman(currentUser) && (
                     <button type="button" className="btn btn-danger" onClick={() => handleDeleteActivity(editingActivity.id)}>Delete</button>
                   )}
                 </div>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                  {!isReadOnly && !isBishop(currentUser) && !editingActivity && (
+                  {/* Committee review button inside modal */}
+                  {editingActivity && isReadOnly && isCommittee(currentUser) && canReviewActivity(editingActivity, currentUser) && !hasReviewed(editingActivity, currentUser) && (
+                    <button type="button" className="btn btn-warning" style={{ fontSize: 12 }} onClick={() => { setIsActivityModalOpen(false); handleCommitteeReview(editingActivity); }}>👁 Mark Reviewed</button>
+                  )}
+                  {/* Approve / Decline inside modal — for any user whose approver turn it is */}
+                  {editingActivity && isReadOnly && canApproveActivity(editingActivity, currentUser) && (
+                    <>
+                      <button type="button" className="btn btn-success" style={{ fontSize: 12 }} onClick={() => { setIsActivityModalOpen(false); handleQuickApprove(editingActivity); }}>✓ Approve</button>
+                      <button type="button" className="btn btn-danger"  style={{ fontSize: 12 }} onClick={() => { setIsActivityModalOpen(false); setDeclineTarget(editingActivity); }}>✕ Decline</button>
+                    </>
+                  )}
+                  {/* Clerk: Print Payment Approval (only for approved activities with a budget) */}
+                  {editingActivity && isClerk(currentUser) && editingActivity.status === 'approved' && (
+                    <button type="button" className="btn btn-primary" style={{ fontSize: 12 }}
+                      onClick={() => { setIsActivityModalOpen(false); setPrintActivity(editingActivity); }}>
+                      🖨 Print Payment Approval
+                    </button>
+                  )}
+                  {/* Presidency: save budget edit */}
+                  {editingActivity && isPresidency(currentUser) && (
+                    <button type="submit" className="btn btn-primary" style={{ fontSize: 12 }}>💾 Save Budget</button>
+                  )}
+                  {!isReadOnly && !isBishop(currentUser) && !isWardChairman(currentUser) && !editingActivity && (
                     <div
                       onClick={() => setActivityEmailConfirm((v) => !v)}
                       style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px', borderRadius: 8, cursor: 'pointer', border: `1px solid ${activityEmailConfirm ? 'rgba(99,102,241,.35)' : t.border}`, background: activityEmailConfirm ? (dark ? 'rgba(99,102,241,.1)' : '#ede9fe') : 'transparent', transition: 'all .2s', userSelect: 'none' }}
@@ -1739,7 +2197,7 @@ export default function App() {
                   <button type="button" className="btn btn-ghost" onClick={() => setIsActivityModalOpen(false)}>
                     {isReadOnly ? 'Close' : 'Cancel'}
                   </button>
-                  {!isReadOnly && !isBishop(currentUser) && (
+                  {!isReadOnly && !isBishop(currentUser) && !isPresidency(currentUser) && (
                     <button type="submit" className="btn btn-success" disabled={conflictError.startsWith('Venue conflict')}>Save Activity</button>
                   )}
                 </div>
@@ -1748,6 +2206,134 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ── Payment Approval Print Modal (Clerk + Submitter) ── */}
+      {printActivity && (() => {
+        const act = printActivity;
+        // Find Stake President (calling has "President" not "Counselor") and a Counselor
+        const presidencyMembers = users.filter((u) => u.role === 'Stake Presidency');
+        const stakePresident    = presidencyMembers.find((u) => isStakePresident(u)) || presidencyMembers[0] || null;
+        const stakeCounselor    = presidencyMembers.find((u) => isStakeCounselor(u)) || presidencyMembers.find((u) => u !== stakePresident) || null;
+        const submitterUser     = users.find((u) => u.id === act.user_id) || null;
+        const submitterName     = submitterUser?.name || act.submitter_name || '—';
+        const approver1Name     = stakePresident?.name || '—';
+        const approver1Calling  = stakePresident?.calling || 'Stake President';
+        const approver2Name     = stakeCounselor?.name || '—';
+        const approver2Calling  = stakeCounselor?.calling || 'Stake Counselor';
+        const budgetAmt         = act.proposed_budget != null ? `P ${Number(act.proposed_budget).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—';
+        const actDate           = act.date ? new Date(act.date + 'T00:00:00').toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' }) : '—';
+
+        const handleDownloadPAF = async () => {
+          try {
+            // ── 1. Load pdf-lib dynamically (no build step needed) ──────────
+            const { PDFDocument, rgb, StandardFonts } = await import('https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js');
+
+            // ── 2. Fetch the blank official PAF template from Supabase Storage ──
+            const PAF_TEMPLATE_URL = 'https://wdkyjfuikwamiiblpyio.supabase.co/storage/v1/object/public/assets/Payment-Approval-Form-Mar2020.pdf';
+            const templateBytes = await fetch(PAF_TEMPLATE_URL).then((r) => r.arrayBuffer());
+
+            // ── 3. Load and modify the PDF ───────────────────────────────────
+            const pdfDoc = await PDFDocument.load(templateBytes);
+            const page   = pdfDoc.getPages()[0];
+            const font     = await pdfDoc.embedFont(StandardFonts.Helvetica);
+            const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+            const H      = page.getHeight(); // 792 pt
+
+            // Helper: draw text at PDF coordinates (x from left, topY from top)
+            const txt = (x, topY, value, size = 9, bold = true) => {
+              if (!value || value === '—') return;
+              page.drawText(String(value), { x, y: H - topY, font: bold ? fontBold : font, size, color: rgb(0, 0, 0) });
+            };
+            // Helper: draw X inside a checkbox centred at (cx, topY)
+            const chk = (cx, topY) => {
+              page.drawText('X', { x: cx - 3, y: H - topY + 1, font, size: 7, color: rgb(0, 0, 0) });
+            };
+
+            // ── Row 1: Stake name | Activity Date | Amount ───────────────────
+            txt(20,  145, 'Talisay Philippines Stake', 9, true);
+            txt(300, 145, actDate);
+            txt(450, 145, budgetAmt);
+
+            // ── Row 2: Payee | Payment Category (Budget ✓) ──────────────────
+            txt(20,  175, submitterName, 9, true);
+            chk(301, 173.50); // Budget checkbox
+
+            // ── Row 3: Payment Purpose ───────────────────────────────────────
+            txt(20,  205, act.description || act.title || '', 9);
+
+            // ── Row 4: Org Leader / Requestor + Date ─────────────────────────
+            txt(20,  288, submitterName, 9, true);
+            txt(208, 288, actDate);
+
+            // ── 1st Approver: Stake President + Date ─────────────────────────
+            txt(20,  330, approver1Name, 9, true);
+            txt(230, 330, actDate);
+
+            // ── 2nd Approver: Stake Counselor + Date ─────────────────────────
+            txt(310, 330, approver2Name, 9, true);
+            txt(510, 330, actDate);
+
+            // ── Cash Advance section: Amount of cash received ────────────────
+            if (act.proposed_budget != null) txt(400, 436, budgetAmt);
+
+            // ── 4. Save and trigger download ──────────────────────────────────
+            const pdfBytes = await pdfDoc.save();
+            const blob     = new Blob([pdfBytes], { type: 'application/pdf' });
+            const url      = URL.createObjectURL(blob);
+            const a        = document.createElement('a');
+            a.href         = url;
+            a.download     = `PAF-${(act.title || 'activity').replace(/\s+/g, '-')}-${act.date || 'undated'}.pdf`;
+            a.click();
+            URL.revokeObjectURL(url);
+            setPrintActivity(null);
+            showToast('PAF downloaded successfully!');
+          } catch (err) {
+            console.error('PAF generation failed:', err);
+            showToast(`Could not generate PDF: ${err.message}`, 'error');
+          }
+        };
+
+        return (
+          <div className="modal-overlay" onClick={() => setPrintActivity(null)}>
+            <div className="modal-card slide-up" style={{ maxWidth: 600 }} onClick={(e) => e.stopPropagation()}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                <h3 style={{ fontSize: 18, fontWeight: 700, color: t.text1 }}>🖨 Payment Approval Form</h3>
+                <button className="btn btn-ghost" style={{ padding: '6px 10px', fontSize: 16 }} onClick={() => setPrintActivity(null)}>✕</button>
+              </div>
+
+              {/* Preview summary */}
+              <div style={{ background: t.surfaceSecondary, borderRadius: 10, border: `1px solid ${t.border}`, padding: '16px 20px', marginBottom: 20 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#818cf8', letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 12 }}>Document Summary</div>
+                {[
+                  { label: 'Stake',             value: 'Talisay Philippines Stake' },
+                  { label: 'Payee',             value: submitterName },
+                  { label: 'Payment Purpose',   value: act.description || act.title || '—' },
+                  { label: 'Activity Date',     value: actDate },
+                  { label: 'Amount',            value: budgetAmt },
+                  { label: 'Name of Requestor', value: submitterName },
+                  { label: '1st Approver',      value: `${approver1Name} — ${approver1Calling}` },
+                  { label: '2nd Approver',      value: `${approver2Name} — ${approver2Calling}` },
+                ].map(({ label, value }) => (
+                  <div key={label} style={{ display: 'flex', gap: 12, marginBottom: 8, alignItems: 'flex-start' }}>
+                    <span style={{ width: 148, fontSize: 11, fontWeight: 600, color: t.text3, flexShrink: 0, textTransform: 'uppercase', letterSpacing: '.05em', paddingTop: 1 }}>{label}</span>
+                    <span style={{ fontSize: 13, color: t.text1, fontWeight: 500 }}>{value}</span>
+                  </div>
+                ))}
+                <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 6, background: dark ? 'rgba(245,158,11,.08)' : '#fffbeb', border: '1px solid rgba(245,158,11,.25)', fontSize: 11, color: '#f59e0b' }}>
+                  ⚠ Fields marked in the printed form (Check No., Account No., Fund, Budget Category, 2nd Approver) must be filled in manually.
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                <button className="btn btn-ghost" onClick={() => setPrintActivity(null)}>Cancel</button>
+                <button className="btn btn-primary" onClick={handleDownloadPAF}>⬇ Download Filled PAF</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+
 
       {/* ── User Modal ── */}
       {isUserModalOpen && (
@@ -1774,9 +2360,12 @@ export default function App() {
                   <label style={{ marginBottom: 10 }}>Role / Access Level</label>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {[
-                      { val: '',            label: 'Member',        desc: 'Submit activities and monitor individual requests.', bg: 'rgba(148,163,184,.1)', color: t.text2,   border: t.border },
-                      { val: 'Agent Bishop',label: 'Agent Bishop',  desc: 'Approve and decline activities under Stake Center.',  bg: 'rgba(6,182,212,.1)',   color: '#06b6d4', border: 'rgba(6,182,212,.3)'  },
-                      { val: '__admin__',   label: 'Administrator', desc: 'Full system superuser configuration.',                bg: 'rgba(99,102,241,.1)',  color: '#6366f1', border: 'rgba(99,102,241,.3)' },
+                      { val: '',                       label: 'Member',                   desc: 'Submit activities and monitor individual requests.',                         bg: 'rgba(148,163,184,.1)', color: t.text2,   border: t.border },
+                      { val: 'Ward Activity Chairman', label: 'Ward Activity Chairman',   desc: 'First approver for Ward activities before the Agent Bishop.',                             bg: 'rgba(16,185,129,.1)',  color: '#10b981', border: 'rgba(16,185,129,.3)' },
+                      { val: 'Stake Presidency',       label: 'Stake Presidency',         desc: 'Final approver for all stake activities. Can edit the proposed budget during review.',       bg: 'rgba(99,102,241,.1)',  color: '#6366f1', border: 'rgba(99,102,241,.3)' },
+                      { val: 'Agent Bishop',           label: 'Agent Bishop',             desc: 'Second approver for stake activities (after committee); final approver for Ward.',        bg: 'rgba(6,182,212,.1)',   color: '#06b6d4', border: 'rgba(6,182,212,.3)'  },
+                      { val: 'Clerk',                  label: 'Clerk',                    desc: 'View-only access to all activities including approved budget. Can print Payment Approval.',  bg: 'rgba(168,85,247,.1)',  color: '#a855f7', border: 'rgba(168,85,247,.3)' },
+                      { val: '__admin__',              label: 'System Administrator',     desc: 'Full system access. Not a workflow approver — reserved for system admin.',  bg: 'rgba(239,68,68,.1)',   color: '#ef4444', border: 'rgba(239,68,68,.3)'  },
                     ].map((opt) => {
                       const selected = opt.val === '__admin__' ? userForm.isAdmin : (!userForm.isAdmin && userForm.role === opt.val);
                       return (
@@ -1809,7 +2398,7 @@ export default function App() {
                   </div>
                   <div>
                     <div style={{ fontSize: 13, fontWeight: 700, color: userForm.isActivityCommittee ? '#f59e0b' : t.text1 }}>Stake Activity Committee Member</div>
-                    <div style={{ fontSize: 11, color: t.text3, marginTop: 2 }}>This person will be CC'd on all activity approval confirmation emails and can view pending approvals.</div>
+                    <div style={{ fontSize: 11, color: t.text3, marginTop: 2 }}>Stacks with any role above. All members must mark \"reviewed\" before the activity advances to Agent Bishop. If they also hold an approver role (e.g. Presidency), both capabilities are active independently. They are CC'd on all approval emails.</div>
                   </div>
                 </div>
               </div>
